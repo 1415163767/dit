@@ -12,10 +12,10 @@ accelerate launch \
   --zero_stage 3 \
   --num_machines 4 \
   --machine_rank 3 \
-  --main_process_ip 100.64.61.187 \
+  --main_process_ip 100.66.21.146 \
   --main_process_port 29500 \
   --num_processes 32 \
-  --deepspeed_config_file config/zero_stage3_config.json \
+  --deepspeed_config_file config/zero_stage2_config.json \
   --deepspeed_multinode_launcher standard \
   scripts/wan2.2/train.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
