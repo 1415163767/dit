@@ -2,17 +2,17 @@ export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.2-TI2V-5B"
 # export MODEL_NAME="/home/v-yanboding/dit_training/ckpt/Wan2.2"
 export VQ_PATH="/blob/dyb_output/icml2026/single_codebook_ema/checkpoint-55399/model.safetensors"
 export DATA_PATH="/blob/dyb/processed_data"
-export OUTPUT="/blob/dyb_output/icml2026/dit_single_ema_codebook_self_attn"
+export OUTPUT="/blob/dyb_output/icml2026/dit_single_ema_codebook_cross_attn"
 NCCL_DEBUG=INFO
 
 export WANDB_PROJECT="icml_2026_dit_ablation"
 
 accelerate launch \
   --use_deepspeed \
-  --zero_stage 3 \
+  --zero_stage 2 \
   --num_machines 4 \
   --machine_rank 1 \
-  --main_process_ip 100.66.21.146 \
+  --main_process_ip 100.64.208.57 \
   --main_process_port 29500 \
   --num_processes 32 \
   --deepspeed_config_file config/zero_stage2_config.json \
