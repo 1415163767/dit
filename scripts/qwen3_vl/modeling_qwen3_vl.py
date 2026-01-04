@@ -766,9 +766,9 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
 
         hidden_states = self.merger(hidden_states)
 
-        hidden_states, code_idx, codebook_loss = self.vq(hidden_states)
-
-        return hidden_states, deepstack_feature_lists, code_idx, codebook_loss['loss']
+        # hidden_states, code_idx, codebook_loss = self.vq(hidden_states)
+        
+        return hidden_states, deepstack_feature_lists, None, None
 
 
 @auto_docstring(
