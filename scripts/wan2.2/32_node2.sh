@@ -12,7 +12,7 @@ accelerate launch \
   --zero_stage 2 \
   --num_machines 4 \
   --machine_rank 2 \
-  --main_process_ip 100.64.208.57 \
+  --main_process_ip 100.64.117.44 \
   --main_process_port 29500 \
   --num_processes 32 \
   --deepspeed_config_file config/zero_stage2_config.json \
