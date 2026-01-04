@@ -1470,6 +1470,7 @@ def main():
         num_warmup_steps = int(args.max_train_steps * args.lr_warmup_ratio)
     else:
         num_warmup_steps = args.lr_warmup_steps
+    num_warmup_steps=num_warmup_steps // accelerator.num_processes
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
