@@ -24,7 +24,7 @@ from safetensors.torch import load_file
 from torch.utils.data import BatchSampler, Sampler
 from torch.utils.data.dataset import Dataset
 
-VIDEO_READER_TIMEOUT = 100
+VIDEO_READER_TIMEOUT = 1000
 
 def get_random_mask(shape, image_start_only=False):
     f, c, h, w = shape
