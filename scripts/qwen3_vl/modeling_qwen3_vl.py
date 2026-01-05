@@ -41,12 +41,8 @@ from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, is_torchdynamo_compiling
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import check_model_inputs
-try:
-    from qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
-    from vq import VQ
-except:
-    from .configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
-    from ..vq import VQ
+from qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
+from vq import VQ
 
 
 class Qwen3VLVisionMLP(nn.Module):
@@ -587,7 +583,8 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
 
         head_dim = config.hidden_size // config.num_heads
-        self.rotary_pos_emb = Qwen3VLVisionRotaryEmbedding(head_dim // 2)
+        self.rotary_pos_emb_old = Qwen3VLVisionRotaryEmbedding(head_dim // 2)
+        self.rotary_pos_emb_new = Qwen3VLVisionRotaryEmbedding(head_dim)
 
         self.blocks = nn.ModuleList([Qwen3VLVisionBlock(config) for _ in range(config.depth)])
         self.merger = Qwen3VLVisionPatchMerger(
@@ -608,19 +605,22 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
 
         # VQ projection for IBQ
         self.vq = VQ(
-            z_channels=2048,    # 2048
-            codebook_size=16384,  # codebook size: 16384
-            codebook_dim=2048,  # 2048
-            use_transformer=False,
+            z_channels=2048,
+            codebook_size=16384,
+            codebook_dim=2048,
+            use_transformer=True,
             config=copy.deepcopy(config),  # use the same config as the model
         )
         self.gradient_checkpointing = False
 
-    def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
+    def rot_pos_emb(self, grid_thw: torch.Tensor, old=True) -> torch.Tensor:
         merge_size = self.spatial_merge_size
 
         max_hw = int(grid_thw[:, 1:].max().item())
-        freq_table = self.rotary_pos_emb(max_hw)  # (max_hw, dim // 2)
+        if old:
+            freq_table = self.rotary_pos_emb_old(max_hw)  # (max_hw, dim // 2)
+        else:
+            freq_table = self.rotary_pos_emb_new(max_hw)  # (max_hw, dim)
         device = freq_table.device
 
         total_tokens = int(torch.prod(grid_thw, dim=1).sum().item())
@@ -628,27 +628,54 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
 
         offset = 0
         for num_frames, height, width in grid_thw:
-            merged_h, merged_w = height // merge_size, width // merge_size
+            coords = []
 
-            block_rows = torch.arange(merged_h, device=device)  # block row indices
-            block_cols = torch.arange(merged_w, device=device)  # block col indices
-            intra_row = torch.arange(merge_size, device=device)  # intra-block row offsets
-            intra_col = torch.arange(merge_size, device=device)  # intra-block col offsets
+            # 1. 整块区域
+            for h0 in range(0, height - height % merge_size, merge_size):
+                for w0 in range(0, width - width % merge_size, merge_size):
+                    rows = torch.arange(h0, h0 + merge_size, device=device)
+                    cols = torch.arange(w0, w0 + merge_size, device=device)
+                    mesh = torch.stack(torch.meshgrid(rows, cols, indexing='ij'), dim=-1).reshape(-1,2)
+                    coords.append(mesh)
 
-            # Compute full-resolution positions
-            row_idx = block_rows[:, None, None, None] * merge_size + intra_row[None, None, :, None]
-            col_idx = block_cols[None, :, None, None] * merge_size + intra_col[None, None, None, :]
+            # 2. 奇数剩余行
+            if height % merge_size != 0:
+                h0 = height - height % merge_size
+                rows = torch.arange(h0, height, device=device)
+                cols = torch.arange(0, width - width % merge_size, device=device)
+                if cols.numel() > 0:
+                    mesh = torch.stack(torch.meshgrid(rows, cols, indexing='ij'), dim=-1).reshape(-1,2)
+                    coords.append(mesh)
 
-            row_idx = row_idx.expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
-            col_idx = col_idx.expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
+            # 3. 奇数剩余列
+            if width % merge_size != 0:
+                w0 = width - width % merge_size
+                rows = torch.arange(0, height - height % merge_size, device=device)
+                cols = torch.arange(w0, width, device=device)
+                if rows.numel() > 0:
+                    mesh = torch.stack(torch.meshgrid(rows, cols, indexing='ij'), dim=-1).reshape(-1,2)
+                    coords.append(mesh)
 
-            coords = torch.stack((row_idx, col_idx), dim=-1)
+            # 4. 最后右下角不足块（同时剩余行列）
+            if height % merge_size != 0 and width % merge_size != 0:
+                rows = torch.arange(height - height % merge_size, height, device=device)
+                cols = torch.arange(width - width % merge_size, width, device=device)
+                mesh = torch.stack(torch.meshgrid(rows, cols, indexing='ij'), dim=-1).reshape(-1,2)
+                coords.append(mesh)
+
+            coords = torch.cat(coords, dim=0)
 
             if num_frames > 1:
                 coords = coords.repeat(num_frames, 1)
-
+            
+            coords[:,0] = coords[:,0].clamp(0, height-1)
+            coords[:,1] = coords[:,1].clamp(0, width-1)
             num_tokens = coords.shape[0]
-            pos_ids[offset : offset + num_tokens] = coords
+            assert offset + num_tokens <= pos_ids.shape[0]
+            assert coords[:,0].max() < height and coords[:,1].max() < width
+            assert coords[:,0].min() >= 0 and coords[:,1].min() >= 0
+
+            pos_ids[offset:offset+num_tokens] = coords
             offset += num_tokens
 
         embeddings = freq_table[pos_ids]  # lookup rotary embeddings
@@ -750,7 +777,6 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
-        deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
@@ -758,17 +784,12 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
-            if layer_num in self.deepstack_visual_indexes:
-                deepstack_feature = self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](
-                    hidden_states
-                )
-                deepstack_feature_lists.append(deepstack_feature)
 
         hidden_states = self.merger(hidden_states)
 
-        # hidden_states, code_idx, codebook_loss = self.vq(hidden_states)
-        
-        return hidden_states, deepstack_feature_lists, None, None
+        hidden_states, codebook_loss = self.vq(hidden_states, is_image=False)
+
+        return hidden_states, codebook_loss['loss']
 
 
 @auto_docstring(
@@ -893,7 +914,8 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
 
     def _deepstack_process(
         self, hidden_states: torch.Tensor, visual_pos_masks: torch.Tensor, visual_embeds: torch.Tensor
-    ):  
+    ):
+        visual_pos_masks = visual_pos_masks.to(hidden_states.device)
         visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
         local_this = hidden_states[visual_pos_masks, :].clone() + visual_embeds
         hidden_states[visual_pos_masks, :] = local_this
@@ -914,7 +936,6 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         self.visual = Qwen3VLVisionModel._from_config(config.vision_config)
         self.language_model = Qwen3VLTextModel._from_config(config.text_config)
         self.rope_deltas = None  # cache rope_deltas here
-        self.position_ids = None
         self.image_vq_loss_weight = 2.0
         self.video_vq_loss_weight = 1.0
 
@@ -1138,7 +1159,6 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        task_type: Optional[str] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, Qwen3VLModelOutputWithPast]:
         r"""
@@ -1151,19 +1171,11 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if inputs_embeds is None:
-            if task_type == "understanding" or len(input_ids[0]) > 1:
-                inputs_embeds = self.get_input_embeddings()(input_ids)
-                global ds_index
-                ds_index = 0
-                # import pdb; pdb.set_trace()
-            elif task_type == "generation":
-                inputs_embeds = self.visual.vq.quantize.dequantize(input_ids)
-                inputs_embeds = inputs_embeds.to(self.language_model.embed_tokens.weight.dtype)
+            inputs_embeds = self.get_input_embeddings()(input_ids)
 
         image_mask = None
         video_mask = None
         vq_loss = None
-        code_idx = None
 
         if pixel_values is not None:
             image_embeds, deepstack_image_embeds, code_idx, vq_loss = self.get_image_features(pixel_values, image_grid_thw)
@@ -1207,13 +1219,6 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             visual_pos_masks = video_mask
             deepstack_visual_embeds = deepstack_video_embeds
 
-        # if 'deep_stack_features' in kwargs:
-        if 'deep_stack_features' in kwargs and kwargs['deep_stack_features'] is not None and len(input_ids[0]) == 1:
-            visual_pos_masks = torch.tensor([0])
-            deepstack_visual_embeds = [embeds[ds_index] for embeds in kwargs['deep_stack_features']]
-            ds_index += 1
-            import pdb; pdb.set_trace()
-
         if position_ids is None:
             attention_mask_tensor = (
                 attention_mask if not isinstance(attention_mask, dict) else attention_mask["full_attention"]
@@ -1253,19 +1258,16 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                     if cache_position is not None
                     else 0
                 )
-                if self.position_ids is None:
-                    position_ids = torch.arange(seq_length, device=inputs_embeds.device)
-                    position_ids = position_ids.view(1, -1).expand(batch_size, -1)
-                    if cache_position is not None:  # otherwise `deltas` is an int `0`
-                        delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
-                    position_ids = position_ids.add(delta)
-                    position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
-                else:
-                    position_ids = self.position_ids[:, :, delta].squeeze(-1)
+                position_ids = torch.arange(seq_length, device=inputs_embeds.device)
+                position_ids = position_ids.view(1, -1).expand(batch_size, -1)
+                if cache_position is not None:  # otherwise `deltas` is an int `0`
+                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                position_ids = position_ids.add(delta)
+                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
         outputs = self.language_model(
             input_ids=None,
-            position_ids=position_ids[:, :, :input_ids.shape[-1]],
+            position_ids=position_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
@@ -1323,9 +1325,7 @@ class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
     def __init__(self, config):
         super().__init__(config)
         self.model = Qwen3VLModel(config)
-        self.vision_vocab_size = self.model.visual.vq.quantize.codebook.shape[0] + 1
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
-        self.gen_head = nn.Linear(config.text_config.hidden_size, self.vision_vocab_size, bias=False)
 
         self.post_init()
 
@@ -1400,28 +1400,31 @@ class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             cache_position=cache_position,
-            task_type=task_type,
             **kwargs,
         )
+
         hidden_states = outputs[0]
-        loss = None
 
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        if hidden_states.shape[1] > 1:
-            slice_indices = slice(None)
-        else:
-            slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        if task_type == "understanding":
-            logits = self.lm_head(hidden_states[:, slice_indices, :])
-            if labels is not None:
-                loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size)
-        elif task_type == "generation":
-            logits = self.gen_head(hidden_states[:, slice_indices, :])
-            if labels is not None:
-                loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.vision_vocab_size)
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
 
-        if 'vq_loss' in outputs and loss is not None:
-            loss = loss + outputs.vq_loss
+        video_start_pos = None
+        if task_type == "generation":
+            video_start_pos = [list(label_c).index(self.config.vision_start_token_id) for label_c in labels]
+            for i, label_c in enumerate(labels):
+                label_c[video_start_pos[i]] = -100
+                label_c[video_start_pos[i]+1:video_start_pos[i]+len(outputs.code_idx)+1] = outputs.code_idx.flatten()
+                if label_c[-3] == self.config.vision_end_token_id:
+                    label_c[-3] = 16384
+                    label_c[-2:] = -100
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size)
+
+            if 'vq_loss' in outputs:
+                loss = loss + outputs.vq_loss
 
         return Qwen3VLCausalLMOutputWithPast(
             loss=loss,
