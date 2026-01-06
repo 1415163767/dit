@@ -236,7 +236,7 @@ class ImageVideoDataset(Dataset):
             processed_frames.append(cropped_frame)
         pixel_values = torch.from_numpy(np.stack(processed_frames, axis=0))  # (T, H, W, C)
         pixel_values_for_vit = pixel_values[::self.vit_sample_stride].permute(0, 3, 1, 2).contiguous()
-        vit_values, gird_thw = self.processor.video_processor.preprocess(pixel_values_for_vit, task="generation", do_sample_frames=False).values()
+        vit_values, gird_thw = self.processor.video_processor.preprocess(pixel_values_for_vit, do_sample_frames=False).values()
 
         if not self.enable_bucket:
             pixel_values = pixel_values.permute(0, 3, 1, 2).contiguous()
