@@ -27,6 +27,7 @@ accelerate launch \
   --video_sample_n_frames=121 \
   --resolution_list "(384,384)" "(288,512)" "(512,288)" \
   --train_batch_size=1 \
+  --resume_from_checkpoint "latest" \
   --gradient_accumulation_steps=1 \
   --dataloader_num_workers=8 \
   --num_train_epochs=1 \
