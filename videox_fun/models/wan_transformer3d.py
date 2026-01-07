@@ -493,6 +493,39 @@ class WanAttentionBlock(nn.Module):
         return x
 
 
+class ViTCrossAttention(WanSelfAttention):
+
+    def forward(self, x, context, seq_lens, grid_sizes, freqs, dtype):
+        r"""
+        Args:
+            x(Tensor): Shape [B, L, num_heads, C / num_heads]
+            context(Tensor): Shape [B, L2, C]
+            seq_lens(Tensor): Shape [B]
+            grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
+            freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
+        """
+        b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+
+        q = self.norm_q(self.q(x.to(dtype))).view(b, s, n, d)
+        k = self.norm_k(self.k(context.to(dtype))).view(b, s, n, d)
+        v = self.v(context.to(dtype)).view(b, s, n, d)
+        q, k = rope_apply_qk(q, k, grid_sizes, freqs)
+
+        x = attention(
+            q.to(dtype), 
+            k.to(dtype), 
+            v=v.to(dtype),
+            k_lens=seq_lens,
+            window_size=self.window_size)
+        x = x.to(dtype)
+
+        # output
+        x = x.flatten(2)
+        x = self.o(x)
+        return x
+
+
+
 class Head(nn.Module):
 
     def __init__(self, dim, out_dim, patch_size, eps=1e-6):
@@ -646,8 +679,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # vit
         vit_dim = 2048
         self.vit_projection = nn.Linear(vit_dim, dim, bias=False)
-        # self.fusion_attn = ViTCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
-        self.fusion_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps)
+        self.fusion_attn = ViTCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
         self.add_vit_features_layer_idx = [0]
 
         self.time_embedding = nn.Sequential(
@@ -939,7 +971,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 vit_fea = torch.stack(vit_fea, dim=0)
             vit_fea = apply_dropout(vit_fea, training=self.training)
             vit_fea = self.vit_projection(vit_fea)
-            vit_fea = self.fusion_attn(vit_fea, seq_lens, grid_sizes, self.freqs, dtype, t=t)
+            vit_fea = self.fusion_attn(x, vit_fea, seq_lens, grid_sizes, self.freqs, dtype)
 
         # Context Parallel
         if self.sp_world_size > 1:
