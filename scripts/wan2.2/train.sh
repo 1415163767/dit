@@ -1,0 +1,44 @@
+# export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.2-TI2V-5B"
+export MODEL_NAME="/home/v-yanboding/dit_training/ckpt/Wan2.2"
+export VQ_PATH="/blob/dyb_output/icml2026/multiple_codebook_ema/checkpoint-55399/model.safetensors"
+export DATA_PATH="/blob/dyb/processed_data"
+export OUTPUT="./output_test"
+NCCL_DEBUG=INFO
+
+export WANDB_PROJECT="test"
+
+accelerate launch \
+  --use_deepspeed \
+  --zero_stage 3 \
+  --deepspeed_config_file config/zero_stage3_config.json \
+  --deepspeed_multinode_launcher standard \
+  scripts/wan2.2/train.py \
+  --config_path="config/wan2.2/wan_civitai_5b.yaml" \
+  --pretrained_model_name_or_path=$MODEL_NAME \
+  --train_data_dir=$DATA_PATH \
+  --vq_model_path=$VQ_PATH \
+  --video_sample_stride=1 \
+  --vit_sample_stride=2 \
+  --video_sample_n_frames=121 \
+  --resolution_list "(384,384)" "(288,512)" "(512,288)" \
+  --train_batch_size=1 \
+  --gradient_accumulation_steps=1 \
+  --dataloader_num_workers=8 \
+  --num_train_epochs=1 \
+  --checkpointing_steps=5000 \
+  --learning_rate=2e-05 \
+  --lr_scheduler="cosine" \
+  --lr_warmup_ratio=0.03 \
+  --seed=42 \
+  --output_dir=$OUTPUT \
+  --gradient_checkpointing \
+  --mixed_precision="bf16" \
+  --adam_weight_decay=3e-2 \
+  --adam_epsilon=1e-10 \
+  --vae_mini_batch=1 \
+  --max_grad_norm=0.05 \
+  --uniform_sampling \
+  --boundary_type="full" \
+  --train_mode="normal" \
+  --trainable_modules "." \
+  --report_to wandb
