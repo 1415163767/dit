@@ -1,8 +1,8 @@
 export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.2-TI2V-5B"
 # export MODEL_NAME="/home/v-yanboding/dit_training/ckpt/Wan2.2"
-export VQ_PATH="/blob/dyb_output/icml2026/embedding_codebook_w_decoder/checkpoint-55399/model.safetensors"
+export VQ_PATH="/blob/dyb_output/icml2026/embedding_codebook_w_llm/checkpoint-55397/model.safetensors"
 export DATA_PATH="/blob/dyb/processed_data"
-export OUTPUT="/blob/dyb_output/icml2026/dit_embedding_codebook_w_decoder"
+export OUTPUT="/blob/dyb_output/icml2026/dit_embedding_codebook_w_llm"
 NCCL_DEBUG=INFO
 
 export WANDB_PROJECT="icml_2026_dit_ablation"
