@@ -647,6 +647,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         vit_dim = 2048
         num_levels = 4
         self.add_vit_layer_index = [0, 1, 2, 3]
+        self.add_vit_layer_index = [0, 0, 0, 0]
         # self.add_vit_layer_index = [0, 8, 16, 24]
         self.vit_projection = nn.ModuleList([
             nn.Linear(vit_dim, dim, bias=False) for _ in range(num_levels)
@@ -1051,7 +1052,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         **ckpt_kwargs,
                     )
                     if layer_idx in self.add_vit_layer_index:
-                        x = x + new_vit_fea_list[layer_idx]
+                        # x = x + new_vit_fea_list[layer_idx]
+                        x = x + new_vit_fea_list[0] + new_vit_fea_list[1] + new_vit_fea_list[2] + new_vit_fea_list[3]
                         # x = x + new_vit_fea_list[layer_idx//8]
                 else:
                     # arguments
@@ -1067,7 +1069,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                     )
                     x = block(x, **kwargs)
                     if layer_idx in self.add_vit_layer_index:
-                        x = x + new_vit_fea_list[layer_idx]
+                        # x = x + new_vit_fea_list[layer_idx]
+                        x = x + new_vit_fea_list[0] + new_vit_fea_list[1] + new_vit_fea_list[2] + new_vit_fea_list[3]
                         # x = x + new_vit_fea_list[layer_idx//8]
 
         # head
