@@ -12,7 +12,7 @@ accelerate launch \
   --zero_stage 2 \
   --num_machines 4 \
   --machine_rank 3 \
-  --main_process_ip 100.64.151.228 \
+  --main_process_ip 100.64.255.210 \
   --main_process_port 29500 \
   --num_processes 32 \
   --max_restarts 10 \
