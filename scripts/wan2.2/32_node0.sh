@@ -1,8 +1,6 @@
 export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.2-TI2V-5B"
-# export MODEL_NAME="/home/v-yanboding/dit_training/ckpt/Wan2.2"
-export VQ_PATH="/blob/dyb_output/icml2026/single_codebook_ema/checkpoint-55399/model.safetensors"
 export DATA_PATH="/blob/dyb/processed_data"
-export OUTPUT="/blob/dyb_output/icml2026/dit_single_ema_codebook_self_attn"
+export OUTPUT="/blob/dyb_output/icml2026/qwen3vl_2b_metaquery"
 NCCL_DEBUG=INFO
 
 export WANDB_PROJECT="icml_2026_dit_ablation"
@@ -12,7 +10,7 @@ accelerate launch \
   --zero_stage 2 \
   --num_machines 4 \
   --machine_rank 0 \
-  --main_process_ip 100.64.13.91 \
+  --main_process_ip 100.65.138.45 \
   --main_process_port 29500 \
   --num_processes 32 \
   --deepspeed_config_file config/zero_stage2_config.json \
@@ -21,7 +19,6 @@ accelerate launch \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATA_PATH \
-  --vq_model_path=$VQ_PATH \
   --video_sample_stride=1 \
   --vit_sample_stride=2 \
   --video_sample_n_frames=121 \
