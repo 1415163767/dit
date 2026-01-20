@@ -644,11 +644,10 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             nn.Linear(dim, dim))
         
         # vit
-        vit_dim = 2048
-        self.vit_projection = nn.Linear(vit_dim, dim, bias=False)
-        # self.fusion_attn = ViTCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
-        self.fusion_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps)
-        self.add_vit_features_layer_idx = [0]
+        # vit_dim = 4096
+        # self.vit_projection = nn.Linear(vit_dim, dim, bias=False)
+        # # self.fusion_attn = ViTCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
+        # self.fusion_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps)
 
         self.time_embedding = nn.Sequential(
             nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
@@ -937,9 +936,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         if vit_fea is not None:
             if isinstance(vit_fea, list):
                 vit_fea = torch.stack(vit_fea, dim=0)
+            # import pdb; pdb.set_trace()
             vit_fea = apply_dropout(vit_fea, training=self.training)
             vit_fea = self.vit_projection(vit_fea)
             vit_fea = self.fusion_attn(vit_fea, seq_lens, grid_sizes, self.freqs, dtype, t=t)
+            x = x + vit_fea
 
         # Context Parallel
         if self.sp_world_size > 1:
@@ -981,7 +982,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             else:
                 ori_x = x.clone().cpu() if self.teacache.offload else x.clone()
 
-                for idx, block in enumerate(self.blocks):
+                for block in self.blocks:
                     if torch.is_grad_enabled() and self.gradient_checkpointing:
 
                         def create_custom_forward(module):
@@ -1022,7 +1023,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 else:
                     self.teacache.previous_residual_uncond = x.cpu() - ori_x if self.teacache.offload else x - ori_x
         else:
-            for idx, block in enumerate(self.blocks):
+            for block in self.blocks:
                 if torch.is_grad_enabled() and self.gradient_checkpointing:
 
                     def create_custom_forward(module):
@@ -1044,8 +1045,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         t,
                         **ckpt_kwargs,
                     )
-                    if idx in self.add_vit_features_layer_idx:
-                        x = x + vit_fea
                 else:
                     # arguments
                     kwargs = dict(
@@ -1059,8 +1058,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         t=t  
                     )
                     x = block(x, **kwargs)
-                    if idx in self.add_vit_features_layer_idx:
-                        x = x + vit_fea
 
         # head
         if torch.is_grad_enabled() and self.gradient_checkpointing:
