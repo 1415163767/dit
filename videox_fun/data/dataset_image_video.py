@@ -108,6 +108,7 @@ class ImageVideoDataset(Dataset):
     def __init__(
         self,
         data_dir,
+        tokenizer,
         video_sample_stride=1, video_sample_n_frames=33, vit_sample_stride=2,
         resolution_list=[(384, 384), (288, 512), (512, 288)],
         text_drop_ratio=0.1,
@@ -144,7 +145,19 @@ class ImageVideoDataset(Dataset):
                     f"cleaned: {removed_count}, "
                     f"too short: {too_short_count}"
                 )
-        
+              
+        # newly add
+        pretrain_data_path = "/blob/dyb/processed_data/koala/video_captions_vbench_related.json"
+        print(f"Loading from {pretrain_data_path} ...")
+        with open(pretrain_data_path, 'r', encoding='utf-8') as f:
+            list_data_dict.extend(json.load(f))
+        print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
+        pretrain_data_path = "/blob/dyb/processed_data/IPOW_VIDU/test_videos_dataset.json"
+        print(f"Loading from {pretrain_data_path} ...")
+        with open(pretrain_data_path, 'r', encoding='utf-8') as f:
+            list_data_dict.extend(json.load(f))
+        print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
+    
         random.shuffle(list_data_dict)  # Randomly shuffle the data for training
         self.dataset = list_data_dict
         self.length = len(self.dataset)
@@ -173,6 +186,25 @@ class ImageVideoDataset(Dataset):
         self.processor = AutoProcessor.from_pretrained(
             "Qwen/Qwen3-VL-2B-Instruct",
         )
+        self.tokenizer = tokenizer
+        self.prefix = (
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        [{"type": "text", "text": tokenizer.system_prompt}]
+                    ),
+                },
+            ]
+            if tokenizer.system_prompt is not None
+            else []
+        )
+        suffix = (
+            "<begin_of_vid>"
+            + "".join([f"<vid{i}>" for i in range(tokenizer.num_metaqueries)])
+            + "<end_of_vid><|im_end|>"
+        )
+        self.suffix = tokenizer(suffix, add_special_tokens=False).input_ids
 
         # ViT params
         self.vit_sample_stride = vit_sample_stride
@@ -199,7 +231,7 @@ class ImageVideoDataset(Dataset):
             pixel_values = video_file_path[batch_index]
 
         elif isinstance(video_file_path, str):
-            with VideoReader_contextmanager(video_file_path, num_threads=4) as video_reader:
+            with VideoReader_contextmanager(video_file_path, num_threads=1) as video_reader:
                 min_sample_n_frames = min(
                     self.video_sample_n_frames, 
                     int(len(video_reader) * (self.video_length_drop_end - self.video_length_drop_start) // self.video_sample_stride)
@@ -235,8 +267,9 @@ class ImageVideoDataset(Dataset):
             cropped_frame = resized_frame[sh:sh + tgt_h, sw:sw + tgt_w]
             processed_frames.append(cropped_frame)
         pixel_values = torch.from_numpy(np.stack(processed_frames, axis=0))  # (T, H, W, C)
-        pixel_values_for_vit = pixel_values[::self.vit_sample_stride].permute(0, 3, 1, 2).contiguous()
-        vit_values, gird_thw = self.processor.video_processor.preprocess(pixel_values_for_vit, do_sample_frames=False).values()
+        # pixel_values_for_vit = pixel_values[::self.vit_sample_stride].permute(0, 3, 1, 2).contiguous()
+        # vit_values, gird_thw = self.processor.video_processor.preprocess(pixel_values_for_vit, do_sample_frames=False).values()
+        vit_values, gird_thw = torch.tensor(0), torch.tensor(0)
 
         if not self.enable_bucket:
             pixel_values = pixel_values.permute(0, 3, 1, 2).contiguous()
@@ -261,6 +294,12 @@ class ImageVideoDataset(Dataset):
                 return None, None, 'image', None
             else:
                 print("Unsupported data_info dict type:", data_info)
+            
+            conversations = [self.prefix + [{"role": "user","content": [{"type": "text", "text": text}]}]]
+            prompts = [self.tokenizer.apply_chat_template(conv, add_generation_prompt=True) for conv in conversations]
+            prompts = [p + self.suffix for p in prompts]
+            input_ids = torch.tensor(prompts)[0]
+            attention_mask = torch.ones_like(input_ids)
 
         elif isinstance(data_info, (str, np.str_)):
             if data_info.endswith('.json'):
@@ -280,7 +319,7 @@ class ImageVideoDataset(Dataset):
             else:
                 print("Unsupported data_info string type:", data_info)
 
-        return pixel_values, vit_values, grid_thw, text, 'video', video_path
+        return pixel_values, vit_values, grid_thw, input_ids, attention_mask, text, 'video', video_path
 
 
     def __len__(self):
@@ -290,10 +329,12 @@ class ImageVideoDataset(Dataset):
         while True:
             sample = {}
             try:
-                pixel_values, vit_values, grid_thw, name, data_type, file_path = self.get_batch(idx)
+                pixel_values, vit_values, grid_thw, input_ids, attention_mask, name, data_type, file_path = self.get_batch(idx)
                 sample["pixel_values"] = pixel_values
                 sample["vit_values"] = vit_values
                 sample["grid_thw"] = grid_thw
+                sample["input_ids"] = input_ids
+                sample["attention_mask"] = attention_mask
                 sample["text"] = name
                 sample["data_type"] = data_type
                 sample["idx"] = idx
