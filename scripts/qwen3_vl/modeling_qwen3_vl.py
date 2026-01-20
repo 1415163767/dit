@@ -26,6 +26,7 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import List
 
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
@@ -41,11 +42,14 @@ from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, is_torchdynamo_compiling
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import check_model_inputs
+from transformers import AutoTokenizer
 try:
     from qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
+    from qwen3_vl.transformer_encoder import Qwen3Encoder
     from vq import VQ
 except:
     from .configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
+    from .transformer_encoder import Qwen3Encoder
     from ..vq import VQ
 
 
@@ -607,13 +611,13 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
         )
 
         # VQ projection for IBQ
-        self.vq = VQ(
-            z_channels=2048,    # 2048
-            codebook_size=16384,  # codebook size: 16384
-            codebook_dim=2048,  # 2048
-            use_transformer=False,
-            config=copy.deepcopy(config),  # use the same config as the model
-        )
+        # self.vq = VQ(
+        #     z_channels=2048,    # 2048
+        #     codebook_size=16384,  # codebook size: 16384
+        #     codebook_dim=2048,  # 2048
+        #     use_transformer=False,
+        #     config=copy.deepcopy(config),  # use the same config as the model
+        # )
         self.gradient_checkpointing = False
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
@@ -758,12 +762,17 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
+            if layer_num in self.deepstack_visual_indexes:
+                deepstack_feature = self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](
+                    hidden_states
+                )
+                deepstack_feature_lists.append(deepstack_feature)
 
         hidden_states = self.merger(hidden_states)
 
-        # hidden_states, code_idx, codebook_loss = self.vq(hidden_states)
-        
-        return hidden_states, deepstack_feature_lists, None, None
+        hidden_states, code_idx, codebook_loss = self.vq(hidden_states)
+
+        return hidden_states, deepstack_feature_lists, code_idx, codebook_loss['loss']
 
 
 @auto_docstring(
@@ -908,6 +917,8 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         super().__init__(config)
         self.visual = Qwen3VLVisionModel._from_config(config.vision_config)
         self.language_model = Qwen3VLTextModel._from_config(config.text_config)
+        self.num_embeddings = self.get_input_embeddings().num_embeddings
+        self.num_metaqueries = 256
         self.rope_deltas = None  # cache rope_deltas here
         self.position_ids = None
         self.image_vq_loss_weight = 2.0
@@ -1320,8 +1331,7 @@ class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
         self.model = Qwen3VLModel(config)
         self.vision_vocab_size = self.model.visual.vq.quantize.codebook.shape[0] + 1
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
-        self.gen_head = nn.Linear(config.text_config.hidden_size, self.vision_vocab_size, bias=False)
-
+        # self.gen_head = nn.Linear(config.text_config.hidden_size, self.vision_vocab_size, bias=False)
         self.post_init()
 
     def get_input_embeddings(self):
