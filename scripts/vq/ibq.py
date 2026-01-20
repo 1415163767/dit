@@ -478,4 +478,4 @@ class VQ(nn.Module):
                 barrier()  # 其他 rank 在这里等 rank=0 调试完
 
         
-        return x, code_idx, codebook_loss 
+        return x, code_idx, codebook_loss
