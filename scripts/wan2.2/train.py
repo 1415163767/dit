@@ -24,6 +24,7 @@ import pickle
 import shutil
 import sys
 
+import torch.nn as nn
 import accelerate
 import diffusers
 import numpy as np
@@ -76,7 +77,7 @@ from videox_fun.utils.discrete_sampler import DiscreteSampling
 from videox_fun.utils.utils import get_image_to_video_latent, save_videos_grid
 
 # qwen3_vl
-from qwen3_vl import Qwen3VLForConditionalGeneration
+from qwen3_vl import Qwen3VLForConditionalGeneration, Qwen3Encoder, Qwen3VLTextConfig
 
 
 if is_wandb_available():
@@ -819,16 +820,80 @@ def parse_args():
 
 def main():
     args = parse_args()
-
-    # Get VQ Model and load weights
     qwen3_model = Qwen3VLForConditionalGeneration.from_pretrained("Qwen/Qwen3-VL-2B-Instruct", dtype="auto")
-    from safetensors.torch import load_file
-    print(f"Load ViT from Path: {args.vq_model_path}")
-    visual = load_file(args.vq_model_path)
-    qwen3_model.visual.load_state_dict(visual, strict=False)   
-    qwen3_vit = qwen3_model.visual
-    del qwen3_model
+    try:
+        qwen3_model.resize_token_embeddings(qwen3_model.model.num_embeddings + qwen3_model.model.num_metaqueries + 2)
+    except:
+        qwen3_model.resize_token_embeddings(qwen3_model.model.num_embeddings + qwen3_model.model.num_metaqueries + 2, mean_resizing=False)
+    for name, param in qwen3_model.visual.named_parameters():
+        del param
+    for name, buf in qwen3_model.visual.named_buffers():
+        del buf
     torch.cuda.empty_cache()
+
+    def freeze_hook(grad):
+        print(f"HOOK CALLED on [{qwen3_model.model.num_embeddings} / {grad.shape[0]}], old grad max:", grad[:qwen3_model.model.num_embeddings].abs().max(), grad[qwen3_model.model.num_embeddings:].abs().max())
+        grad[: qwen3_model.model.num_embeddings].zero_()
+        print(f"HOOK CALLED on [{qwen3_model.model.num_embeddings} / {grad.shape[0]}], new grad max:", grad[:qwen3_model.model.num_embeddings].abs().max(), grad[qwen3_model.model.num_embeddings:].abs().max())
+        return grad
+
+    encoder = Qwen3Encoder(
+        Qwen3VLTextConfig(
+            head_dim=2048 // 32,
+            hidden_size=2048,
+            intermediate_size=2048 * 4,
+            num_hidden_layers=24,
+            num_attention_heads=2048 // 64,
+            num_key_value_heads=2048 // 64,
+            initializer_range=0.014,
+            use_cache=False,
+            norm=True,
+            rope=True,
+            qk_norm=True,
+            rope_scaling={"mrope_interleaved": True, "rope_type": "default"},
+        ),
+    )
+
+    from diffusers.models.normalization import RMSNorm
+    norm = RMSNorm(4096, eps=1e-5, elementwise_affine=True)
+    with torch.no_grad():
+        norm.weight.fill_(2.0)
+
+    connector = nn.Sequential(
+        encoder,
+        nn.Linear(2048, 4096),
+        nn.GELU(approximate="tanh"),
+        nn.Linear(4096, 4096),
+        norm,
+    )
+
+    qwen3_model.language_model.embed_tokens.weight.register_hook(freeze_hook)
+    qwen3_model.lm_head = nn.Identity()
+
+    qwen3_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-VL-2B-Instruct")
+    qwen3_tokenizer.padding_side = "left"
+    qwen3_tokenizer.num_metaqueries = qwen3_model.model.num_metaqueries
+    qwen3_tokenizer.max_input_text_tokens = qwen3_model.model.num_metaqueries
+    qwen3_tokenizer.system_prompt = "You will be given a video or its caption. Please describe the content of the video in detail in your own words."
+    qwen3_model.model.tokenizer = qwen3_tokenizer
+    qwen3_model.model.pad_token_id = getattr(qwen3_model.model.tokenizer, "tokenizer", qwen3_model.model.tokenizer).pad_token_id
+    tokenizer = getattr(qwen3_model.model.tokenizer, "tokenizer", qwen3_model.model.tokenizer)
+    tokenizer.add_special_tokens(
+        {
+            "additional_special_tokens": [
+                f"<pad_token_{i}>"
+                for i in range(qwen3_model.model.num_embeddings - len(tokenizer))
+            ]
+        }
+    )
+    tokenizer.add_special_tokens(
+        {
+            "additional_special_tokens": ["<begin_of_vid>", "<end_of_vid>"]
+            + [f"<vid{i}>" for i in range(qwen3_model.model.tokenizer.num_metaqueries)]
+        }
+    )
+    qwen3_model.model.boi_token_id = tokenizer.convert_tokens_to_ids("<begin_of_vid>")
+    qwen3_model.model.eoi_token_id = tokenizer.convert_tokens_to_ids("<end_of_vid>")
 
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -940,11 +1005,6 @@ def main():
         **filter_kwargs(FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config['scheduler_kwargs']))
     )
 
-    # Get Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        os.path.join(args.pretrained_model_name_or_path, config['text_encoder_kwargs'].get('tokenizer_subpath', 'tokenizer')),
-    )
-
     def deepspeed_zero_init_disabled_context_manager():
         """
         returns either a context list that includes one that will disable zero.Init or an empty context list
@@ -965,14 +1025,6 @@ def main():
     # `from_pretrained` So CLIPTextModel and AutoencoderKL will not enjoy the parameter sharding
     # across multiple gpus and only UNet2DConditionModel will get ZeRO sharded.
     with ContextManagers(deepspeed_zero_init_disabled_context_manager()):
-        # Get Text encoder
-        text_encoder = WanT5EncoderModel.from_pretrained(
-            os.path.join(args.pretrained_model_name_or_path, config['text_encoder_kwargs'].get('text_encoder_subpath', 'text_encoder')),
-            additional_kwargs=OmegaConf.to_container(config['text_encoder_kwargs']),
-            low_cpu_mem_usage=True,
-            torch_dtype=weight_dtype,
-        )
-        text_encoder = text_encoder.eval()
         # Get Vae
         Chosen_AutoencoderKL = {
             "AutoencoderKLWan": AutoencoderKLWan,
@@ -992,12 +1044,13 @@ def main():
     transformer3d = Wan2_2Transformer3DModel.from_pretrained(
         os.path.join(args.pretrained_model_name_or_path, sub_path),
         transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
-    ).to(weight_dtype)
+    )
+    transformer3d.connector = connector
+    transformer3d.qwen3_model = qwen3_model
+    transformer3d = transformer3d.to(weight_dtype)
 
-    # Freeze vae, text_encoder, qwen3_vit, and set transformer3d to trainable
+    # Freeze vae, and set transformer3d to trainable
     vae.requires_grad_(False)
-    text_encoder.requires_grad_(False)
-    qwen3_vit.requires_grad_(False)
     transformer3d.requires_grad_(False)
 
     if args.transformer_path is not None:
@@ -1149,6 +1202,7 @@ def main():
 
     if args.gradient_checkpointing:
         transformer3d.enable_gradient_checkpointing()
+        transformer3d.connector[0].gradient_checkpointing_enable()
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -1182,13 +1236,20 @@ def main():
     else:
         optimizer_cls = torch.optim.AdamW
 
+    for n, p in transformer3d.qwen3_model.named_parameters():
+        if not 'embed_tokens' in n: 
+            p.requires_grad = False
     trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
     trainable_params_optim = [
         {'params': [], 'lr': args.learning_rate},
         {'params': [], 'lr': args.learning_rate / 2},
     ]
     in_already = []
+
     for name, param in transformer3d.named_parameters():
+        if param.requires_grad == False:
+            print(f"Freeze {name}")
+            continue
         high_lr_flag = False
         if name in in_already:
             continue
@@ -1239,7 +1300,7 @@ def main():
 
     # Get the dataset
     train_dataset = ImageVideoDataset(
-        args.train_data_dir,
+        args.train_data_dir, tokenizer=qwen3_model.model.tokenizer,
         video_sample_stride=args.video_sample_stride, video_sample_n_frames=args.video_sample_n_frames, 
         vit_sample_stride=args.vit_sample_stride, resolution_list=args.resolution_list,
         enable_bucket=args.enable_bucket, enable_inpaint=True if args.train_mode != "normal" else False,
@@ -1421,22 +1482,6 @@ def main():
                 new_examples["mask"] = torch.stack([example for example in new_examples["mask"]])
                 new_examples["clip_pixel_values"] = torch.stack([example for example in new_examples["clip_pixel_values"]])
 
-            # Encode prompts when enable_text_encoder_in_dataloader=True
-            if args.enable_text_encoder_in_dataloader:
-                prompt_ids = tokenizer(
-                    new_examples['text'], 
-                    max_length=args.tokenizer_max_length, 
-                    padding="max_length", 
-                    add_special_tokens=True, 
-                    truncation=True, 
-                    return_tensors="pt"
-                )
-                encoder_hidden_states = text_encoder(
-                    prompt_ids.input_ids
-                )[0]
-                new_examples['encoder_attention_mask'] = prompt_ids.attention_mask
-                new_examples['encoder_hidden_states'] = encoder_hidden_states
-
             return new_examples
         
         # DataLoaders creation:
@@ -1470,7 +1515,7 @@ def main():
         num_warmup_steps = int(args.max_train_steps * args.lr_warmup_ratio)
     else:
         num_warmup_steps = args.lr_warmup_steps
-    num_warmup_steps=num_warmup_steps // accelerator.num_processes
+    num_warmup_steps = num_warmup_steps // accelerator.num_processes
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
@@ -1491,16 +1536,12 @@ def main():
         from functools import partial
         from videox_fun.dist import set_multi_gpus_devices, shard_model
         shard_fn = partial(shard_model, device_id=accelerator.device, param_dtype=weight_dtype)
-        text_encoder = shard_fn(text_encoder)
 
     if args.use_ema:
         ema_transformer3d.to(accelerator.device)
 
-    # Move text_encode, vq_model, and vae to gpu and cast to weight_dtype
+    # Move vae to gpu and cast to weight_dtype
     vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
-    qwen3_vit.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
-    if not args.enable_text_encoder_in_dataloader:
-        text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1633,6 +1674,7 @@ def main():
                         Image.fromarray(np.uint8(clip_pixel_value)).save(f"{args.output_dir}/sanity_check/clip_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.png")
                         save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/mask_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.gif", rescale=True)
             '''
+                        
             with accelerator.accumulate(transformer3d):
                 # Convert images to latent space
                 pixel_values = batch["pixel_values"].to(weight_dtype)
@@ -1735,8 +1777,6 @@ def main():
                 if args.low_vram:
                     torch.cuda.empty_cache()
                     vae.to(accelerator.device)
-                    if not args.enable_text_encoder_in_dataloader:
-                        text_encoder.to("cpu")
 
                 with torch.no_grad():
                     # This way is quicker when batch grows up
@@ -1755,6 +1795,7 @@ def main():
                         with torch.cuda.stream(vae_stream_1):
                             latents = _batch_encode_vae(pixel_values)
                     else:
+                        print("pixel_values:", pixel_values.shape)
                         latents = _batch_encode_vae(pixel_values)
 
                     if args.train_mode != "normal":
@@ -1790,32 +1831,6 @@ def main():
 
                 if args.low_vram:
                     vae.to('cpu')
-                    torch.cuda.empty_cache()
-                    if not args.enable_text_encoder_in_dataloader:
-                        text_encoder.to(accelerator.device)
-
-                if args.enable_text_encoder_in_dataloader:
-                    prompt_embeds = batch['encoder_hidden_states'].to(device=latents.device)
-                else:
-                    with torch.no_grad():
-                        prompt_ids = tokenizer(
-                            batch['text'], 
-                            padding="max_length", 
-                            max_length=args.tokenizer_max_length, 
-                            truncation=True, 
-                            add_special_tokens=True, 
-                            return_tensors="pt"
-                        )
-                        text_input_ids = prompt_ids.input_ids
-                        prompt_attention_mask = prompt_ids.attention_mask
-
-                        seq_lens = prompt_attention_mask.gt(0).sum(dim=1).long()
-                        prompt_embeds = text_encoder(text_input_ids.to(latents.device), attention_mask=prompt_attention_mask.to(latents.device))[0]
-                        prompt_embeds = [u[:v] for u, v in zip(prompt_embeds, seq_lens)]
-
-                if args.low_vram and not args.enable_text_encoder_in_dataloader:
-                    text_encoder.to('cpu')
-                    qwen3_vit.to(accelerator.device)
                     torch.cuda.empty_cache()
 
                 bsz, channel, num_frames, height, width = latents.size()
@@ -1879,15 +1894,23 @@ def main():
                     else:
                         timesteps = mask.new_ones(mask_bs, seq_len) * timesteps[:, None,]
 
-                with torch.no_grad():
-                    vit_features = []
-                    for embeds, grid in zip(batch['vit_values'], batch['grid_thw']):
-                        new_embeds = qwen3_vit(embeds, grid_thw=grid)[0]
-                        vit_features.append(new_embeds)
+                new_prompt_embeds = transformer3d.qwen3_model(
+                    input_ids=batch['input_ids'],
+                    attention_mask=batch['attention_mask'],
+                    task_type='understanding',
+                ).logits
+                # Get positions for all sequences in batch at once
+                boi_pos = torch.where(batch['input_ids'] == qwen3_model.model.boi_token_id)[1]
+                eoi_pos = torch.where(batch['input_ids'] == qwen3_model.model.eoi_token_id)[1]
 
-                if args.low_vram:
-                    qwen3_vit.to('cpu')
-                    torch.cuda.empty_cache()
+                # Create mask for selecting tokens between BOI and EOI
+                batch_size, seq_len_vlm = batch['input_ids'].shape
+                indices = torch.arange(seq_len_vlm, device=batch['input_ids'].device)[None, :].expand(batch_size, -1)
+                mask = (indices > boi_pos[:, None]) & (indices < eoi_pos[:, None])
+
+                new_prompt_embeds = new_prompt_embeds[mask].view(batch_size, -1, new_prompt_embeds.size(-1))
+                new_prompt_embeds = transformer3d.connector(new_prompt_embeds)
+                prompt_embeds = [new_prompt_embeds[0]]
 
                 # Predict the noise residual
                 with torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
@@ -1897,7 +1920,6 @@ def main():
                         t=timesteps,
                         seq_len=seq_len,
                         y=inpaint_latents if args.train_mode != "normal" and args.train_mode != "ti2v" else None,
-                        vit_fea=vit_features,
                     )
                 
                 def custom_mse_loss(noise_pred, target, weighting=None, threshold=50):
@@ -2001,8 +2023,6 @@ def main():
                             ema_transformer3d.copy_to(transformer3d.parameters())
                         log_validation(
                             vae,
-                            text_encoder,
-                            tokenizer,
                             transformer3d,
                             args,
                             config,
@@ -2028,8 +2048,6 @@ def main():
                     ema_transformer3d.copy_to(transformer3d.parameters())
                 log_validation(
                     vae,
-                    text_encoder,
-                    tokenizer,
                     transformer3d,
                     args,
                     config,
