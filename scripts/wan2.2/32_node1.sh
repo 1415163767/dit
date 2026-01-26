@@ -1,6 +1,6 @@
 export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.2-TI2V-5B"
 export DATA_PATH="/blob/dyb/processed_data"
-export OUTPUT="/blob/dyb_output/icml2026/qwen3vl_2b_cn"
+export OUTPUT="/blob/dyb_output/icml2026/qwen3vl_2b_metaquery_cn"
 NCCL_DEBUG=INFO
 
 export WANDB_PROJECT="icml_2026_dit_ablation"
