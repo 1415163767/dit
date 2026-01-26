@@ -119,6 +119,7 @@ class ImageVideoDataset(Dataset):
         return_file_name=False,
     ):  
         list_data_dict = []
+        '''
         for root, dirs, files in os.walk(data_dir):
             dirs[:] = [d for d in dirs if d != 'videos']
             if 'video_captions_all_long_short.json' in files:
@@ -157,7 +158,19 @@ class ImageVideoDataset(Dataset):
         with open(pretrain_data_path, 'r', encoding='utf-8') as f:
             list_data_dict.extend(json.load(f))
         print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
-    
+        '''
+
+        pretrain_data_path = "/blob/dyb/processed_data/koala/video_captions_all.json"
+        print(f"Loading from {pretrain_data_path} ...")
+        with open(pretrain_data_path, 'r', encoding='utf-8') as f:
+            list_data_dict = json.load(f)
+        print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
+        pretrain_data_path = "/blob/dyb/processed_data/IPOW_VIDU/test_videos_dataset.json"
+        print(f"Loading from {pretrain_data_path} ...")
+        with open(pretrain_data_path, 'r', encoding='utf-8') as f:
+            list_data_dict.extend(json.load(f))
+        print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
+      
         random.shuffle(list_data_dict)  # Randomly shuffle the data for training
         self.dataset = list_data_dict
         self.length = len(self.dataset)
