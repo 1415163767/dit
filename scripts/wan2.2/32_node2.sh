@@ -43,7 +43,7 @@ accelerate launch \
   --uniform_sampling \
   --boundary_type="full" \
   --train_mode="normal" \
-  --trainable_modules "." \
+  --trainable_modules "qwen3_model" "connector" \
   --report_to wandb
 
 python /blob/thinking.py
