@@ -199,7 +199,7 @@ class ImageVideoDataset(Dataset):
             pixel_values = video_file_path[batch_index]
 
         elif isinstance(video_file_path, str):
-            with VideoReader_contextmanager(video_file_path, num_threads=4) as video_reader:
+            with VideoReader_contextmanager(video_file_path, num_threads=1) as video_reader:
                 min_sample_n_frames = min(
                     self.video_sample_n_frames, 
                     int(len(video_reader) * (self.video_length_drop_end - self.video_length_drop_start) // self.video_sample_stride)
