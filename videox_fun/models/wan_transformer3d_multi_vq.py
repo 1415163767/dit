@@ -1051,7 +1051,13 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         **ckpt_kwargs,
                     )
                     if layer_idx in self.add_vit_layer_index:
-                        x = x + new_vit_fea_list[layer_idx]
+                        c = new_vit_fea_list[layer_idx]
+                        mean_x = x.mean(dim=(1, 2), keepdim=True)
+                        std_x  = x.std(dim=(1, 2), keepdim=True)
+                        mean_c = c.mean(dim=(1, 2), keepdim=True)
+                        std_c  = c.std(dim=(1, 2), keepdim=True)
+                        c_aligned = (c - mean_c) * (std_x / (std_c + 1e-5)) + mean_x
+                        x = x + c_aligned * 0.2
                         # x = x + new_vit_fea_list[layer_idx//8]
                 else:
                     # arguments
@@ -1067,7 +1073,13 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                     )
                     x = block(x, **kwargs)
                     if layer_idx in self.add_vit_layer_index:
-                        x = x + new_vit_fea_list[layer_idx]
+                        c = new_vit_fea_list[layer_idx]
+                        mean_x = x.mean(dim=(1, 2), keepdim=True)
+                        std_x  = x.std(dim=(1, 2), keepdim=True)
+                        mean_c = c.mean(dim=(1, 2), keepdim=True)
+                        std_c  = c.std(dim=(1, 2), keepdim=True)
+                        c_aligned = (c - mean_c) * (std_x / (std_c + 1e-5)) + mean_x
+                        x = x + c_aligned * 0.2
                         # x = x + new_vit_fea_list[layer_idx//8]
 
         # head
