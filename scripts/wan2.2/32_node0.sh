@@ -15,6 +15,7 @@ accelerate launch \
   --main_process_ip 100.65.27.187 \
   --main_process_port 29500 \
   --num_processes 32 \
+  --max_restarts 10 \
   --deepspeed_config_file config/zero_stage2_config.json \
   --deepspeed_multinode_launcher standard \
   scripts/wan2.2/train.py \
