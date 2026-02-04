@@ -1883,7 +1883,10 @@ def main():
                     vit_features = []
                     for embeds, grid in zip(batch['vit_values'], batch['grid_thw']):
                         new_embeds = qwen3_vit(embeds, grid_thw=grid)[0]
-                        vit_features.append(new_embeds)
+                        new_embeds_mean = new_embeds.mean(dim=-1, keepdim=True)
+                        new_embeds_std = new_embeds.std(dim=-1, keepdim=True).clamp(min=1e-6)
+                        video_embeds = (new_embeds - new_embeds_mean) / new_embeds_std
+                        vit_features.append(video_embeds)
 
                 if args.low_vram:
                     qwen3_vit.to('cpu')
