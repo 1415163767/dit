@@ -762,17 +762,19 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
-            if layer_num in self.deepstack_visual_indexes:
-                deepstack_feature = self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](
-                    hidden_states
-                )
-                deepstack_feature_lists.append(deepstack_feature)
+            # if layer_num in self.deepstack_visual_indexes:
+            #     deepstack_feature = self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](
+            #         hidden_states
+            #     )
+            #     deepstack_feature_lists.append(deepstack_feature)
 
         hidden_states = self.merger(hidden_states)
 
-        hidden_states, code_idx, codebook_loss = self.vq(hidden_states)
+        # hidden_states, code_idx, codebook_loss = self.vq(hidden_states)
 
-        return hidden_states, deepstack_feature_lists, code_idx, codebook_loss['loss']
+        return hidden_states, deepstack_feature_lists, None, None
+
+        # return hidden_states, deepstack_feature_lists, code_idx, codebook_loss['loss']
 
 
 @auto_docstring(
