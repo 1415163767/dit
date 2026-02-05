@@ -1331,7 +1331,7 @@ class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
     def __init__(self, config):
         super().__init__(config)
         self.model = Qwen3VLModel(config)
-        self.vision_vocab_size = self.model.visual.vq.quantize.codebook.shape[0] + 1
+        self.vision_vocab_size = 16384 + 1
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
         # self.gen_head = nn.Linear(config.text_config.hidden_size, self.vision_vocab_size, bias=False)
         self.post_init()
