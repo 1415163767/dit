@@ -1886,7 +1886,7 @@ def main():
                         # new_embeds_mean = new_embeds.mean(dim=-1, keepdim=True)
                         # new_embeds_std = new_embeds.std(dim=-1, keepdim=True).clamp(min=1e-6)
                         # video_embeds = (new_embeds - new_embeds_mean) / new_embeds_std
-                        video_embeds = video_embeds * 0.1
+                        video_embeds = new_embeds * 0.1
                         vit_features.append(video_embeds)
 
                 if args.low_vram:
