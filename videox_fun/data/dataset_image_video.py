@@ -144,6 +144,18 @@ class ImageVideoDataset(Dataset):
                     f"cleaned: {removed_count}, "
                     f"too short: {too_short_count}"
                 )
+
+        # newly add
+        pretrain_data_path = "/blob/dyb/processed_data/koala/video_captions_vbench_related.json"
+        print(f"Loading from {pretrain_data_path} ...")
+        with open(pretrain_data_path, 'r', encoding='utf-8') as f:
+            list_data_dict.extend(json.load(f))
+        print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
+        pretrain_data_path = "/blob/dyb/processed_data/IPOW_VIDU/test_videos_dataset.json"
+        print(f"Loading from {pretrain_data_path} ...")
+        with open(pretrain_data_path, 'r', encoding='utf-8') as f:
+            list_data_dict.extend(json.load(f))
+        print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
         
         random.shuffle(list_data_dict)  # Randomly shuffle the data for training
         self.dataset = list_data_dict
@@ -199,7 +211,7 @@ class ImageVideoDataset(Dataset):
             pixel_values = video_file_path[batch_index]
 
         elif isinstance(video_file_path, str):
-            with VideoReader_contextmanager(video_file_path, num_threads=4) as video_reader:
+            with VideoReader_contextmanager(video_file_path, num_threads=1) as video_reader:
                 min_sample_n_frames = min(
                     self.video_sample_n_frames, 
                     int(len(video_reader) * (self.video_length_drop_end - self.video_length_drop_start) // self.video_sample_stride)
