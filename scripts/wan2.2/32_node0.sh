@@ -34,7 +34,7 @@ accelerate launch \
   --checkpointing_steps=5000 \
   --learning_rate=2e-05 \
   --lr_scheduler="constant_with_warmup" \
-  --lr_warmup_ratio=0.03 \
+  --lr_warmup_ratio=0.01 \
   --seed=42 \
   --output_dir=$OUTPUT \
   --gradient_checkpointing \
