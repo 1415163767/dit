@@ -1,8 +1,8 @@
 export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.2-TI2V-5B"
 # export MODEL_NAME="/home/v-yanboding/dit_training/ckpt/Wan2.2"
-export VQ_PATH="/blob/dyb_output/icml2026/multiple_codebook_ema/checkpoint-55399/model.safetensors"
+export VQ_PATH="/blob/dyb_output/icml2026/multiple_codebook_ema_scale_image_video/checkpoint-963425/model.safetensors"
 export DATA_PATH="/blob/dyb/processed_data"
-export OUTPUT="/blob/dyb_output/icml2026/dit_multiple_ema_codebook_self_attn"
+export OUTPUT="/blob/dyb_output/icml2026/dit_multiple_ema_codebook_self_attn_final_pretrain_codebook"
 NCCL_DEBUG=INFO
 
 export WANDB_PROJECT="icml_2026_dit_ablation"
@@ -33,7 +33,7 @@ accelerate launch \
   --num_train_epochs=1 \
   --checkpointing_steps=5000 \
   --learning_rate=2e-05 \
-  --lr_scheduler="cosine" \
+  --lr_scheduler="constant_with_warmup" \
   --lr_warmup_ratio=0.03 \
   --seed=42 \
   --output_dir=$OUTPUT \
