@@ -644,11 +644,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             nn.Linear(dim, dim))
         
         # vit
-        vit_dim = 2048
-        self.vit_projection = nn.Linear(vit_dim, dim, bias=False)
-        # self.fusion_attn = ViTCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
-        self.fusion_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps)
-        self.add_vit_features_layer_idx = [0]
+        # vit_dim = 2048
+        # self.vit_projection = nn.Linear(vit_dim, dim, bias=False)
+        # # self.fusion_attn = ViTCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
+        # self.fusion_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps)
+        # self.add_vit_features_layer_idx = [0]
 
         self.time_embedding = nn.Sequential(
             nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
@@ -1044,8 +1044,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         t,
                         **ckpt_kwargs,
                     )
-                    if idx in self.add_vit_features_layer_idx:
-                        x = x + vit_fea
+                    # if idx in self.add_vit_features_layer_idx:
+                    #     x = x + vit_fea
                 else:
                     # arguments
                     kwargs = dict(
@@ -1059,8 +1059,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         t=t  
                     )
                     x = block(x, **kwargs)
-                    if idx in self.add_vit_features_layer_idx:
-                        x = x + vit_fea
+                    # if idx in self.add_vit_features_layer_idx:
+                    #     x = x + vit_fea
 
         # head
         if torch.is_grad_enabled() and self.gradient_checkpointing:
