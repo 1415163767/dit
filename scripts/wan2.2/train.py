@@ -821,14 +821,14 @@ def main():
     args = parse_args()
 
     # Get VQ Model and load weights
-    qwen3_model = Qwen3VLForConditionalGeneration.from_pretrained("Qwen/Qwen3-VL-2B-Instruct", dtype="auto")
-    from safetensors.torch import load_file
-    print(f"Load ViT from Path: {args.vq_model_path}")
-    visual = load_file(args.vq_model_path)
-    qwen3_model.visual.load_state_dict(visual, strict=False)   
-    qwen3_vit = qwen3_model.visual
-    del qwen3_model
-    torch.cuda.empty_cache()
+    # qwen3_model = Qwen3VLForConditionalGeneration.from_pretrained("Qwen/Qwen3-VL-2B-Instruct", dtype="auto")
+    # from safetensors.torch import load_file
+    # print(f"Load ViT from Path: {args.vq_model_path}")
+    # visual = load_file(args.vq_model_path)
+    # qwen3_model.visual.load_state_dict(visual, strict=False)   
+    # qwen3_vit = qwen3_model.visual
+    # del qwen3_model
+    # torch.cuda.empty_cache()
 
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -997,7 +997,7 @@ def main():
     # Freeze vae, text_encoder, qwen3_vit, and set transformer3d to trainable
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    qwen3_vit.requires_grad_(False)
+    # qwen3_vit.requires_grad_(False)
     transformer3d.requires_grad_(False)
 
     if args.transformer_path is not None:
@@ -1498,7 +1498,7 @@ def main():
 
     # Move text_encode, vq_model, and vae to gpu and cast to weight_dtype
     vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
-    qwen3_vit.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
+    # qwen3_vit.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
         text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
 
@@ -1815,7 +1815,7 @@ def main():
 
                 if args.low_vram and not args.enable_text_encoder_in_dataloader:
                     text_encoder.to('cpu')
-                    qwen3_vit.to(accelerator.device)
+                    # qwen3_vit.to(accelerator.device)
                     torch.cuda.empty_cache()
 
                 bsz, channel, num_frames, height, width = latents.size()
@@ -1879,18 +1879,18 @@ def main():
                     else:
                         timesteps = mask.new_ones(mask_bs, seq_len) * timesteps[:, None,]
 
-                with torch.no_grad():
-                    vit_features = []
-                    for embeds, grid in zip(batch['vit_values'], batch['grid_thw']):
-                        new_embeds = qwen3_vit(embeds, grid_thw=grid)[0]
-                        # new_embeds_mean = new_embeds.mean(dim=-1, keepdim=True)
-                        # new_embeds_std = new_embeds.std(dim=-1, keepdim=True).clamp(min=1e-6)
-                        # video_embeds = (new_embeds - new_embeds_mean) / new_embeds_std
-                        video_embeds = new_embeds * 0.1
-                        vit_features.append(video_embeds)
+                # with torch.no_grad():
+                #     vit_features = []
+                #     for embeds, grid in zip(batch['vit_values'], batch['grid_thw']):
+                #         new_embeds = qwen3_vit(embeds, grid_thw=grid)[0]
+                #         # new_embeds_mean = new_embeds.mean(dim=-1, keepdim=True)
+                #         # new_embeds_std = new_embeds.std(dim=-1, keepdim=True).clamp(min=1e-6)
+                #         # video_embeds = (new_embeds - new_embeds_mean) / new_embeds_std
+                #         video_embeds = new_embeds * 0.1
+                #         vit_features.append(video_embeds)
 
                 if args.low_vram:
-                    qwen3_vit.to('cpu')
+                    # qwen3_vit.to('cpu')
                     torch.cuda.empty_cache()
 
                 # Predict the noise residual
@@ -1901,7 +1901,7 @@ def main():
                         t=timesteps,
                         seq_len=seq_len,
                         y=inpaint_latents if args.train_mode != "normal" and args.train_mode != "ti2v" else None,
-                        vit_fea=vit_features,
+                        vit_fea=None,
                     )
                 
                 def custom_mse_loss(noise_pred, target, weighting=None, threshold=50):
