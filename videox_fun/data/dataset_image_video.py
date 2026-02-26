@@ -160,11 +160,11 @@ class ImageVideoDataset(Dataset):
         print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
         '''
 
-        pretrain_data_path = "/blob/dyb/processed_data/koala/video_captions_all.json"
-        print(f"Loading from {pretrain_data_path} ...")
-        with open(pretrain_data_path, 'r', encoding='utf-8') as f:
-            list_data_dict = json.load(f)
-        print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
+        # pretrain_data_path = "/blob/dyb/processed_data/koala/video_captions_all.json"
+        # print(f"Loading from {pretrain_data_path} ...")
+        # with open(pretrain_data_path, 'r', encoding='utf-8') as f:
+        #     list_data_dict = json.load(f)
+        # print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
         pretrain_data_path = "/blob/dyb/processed_data/IPOW_VIDU/test_videos_dataset.json"
         print(f"Loading from {pretrain_data_path} ...")
         with open(pretrain_data_path, 'r', encoding='utf-8') as f:
@@ -212,12 +212,6 @@ class ImageVideoDataset(Dataset):
             if tokenizer.system_prompt is not None
             else []
         )
-        suffix = (
-            "<begin_of_vid>"
-            + "".join([f"<vid{i}>" for i in range(tokenizer.num_metaqueries)])
-            + "<end_of_vid><|im_end|>"
-        )
-        self.suffix = tokenizer(suffix, add_special_tokens=False).input_ids
 
         # ViT params
         self.vit_sample_stride = vit_sample_stride
@@ -310,7 +304,6 @@ class ImageVideoDataset(Dataset):
             
             conversations = [self.prefix + [{"role": "user","content": [{"type": "text", "text": text}]}]]
             prompts = [self.tokenizer.apply_chat_template(conv, add_generation_prompt=True) for conv in conversations]
-            prompts = [p + self.suffix for p in prompts]
             input_ids = torch.tensor(prompts)[0]
             attention_mask = torch.ones_like(input_ids)
 
