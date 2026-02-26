@@ -821,21 +821,11 @@ def parse_args():
 def main():
     args = parse_args()
     qwen3_model = Qwen3VLForConditionalGeneration.from_pretrained("Qwen/Qwen3-VL-2B-Instruct", dtype="auto")
-    try:
-        qwen3_model.resize_token_embeddings(qwen3_model.model.num_embeddings + qwen3_model.model.num_metaqueries + 2)
-    except:
-        qwen3_model.resize_token_embeddings(qwen3_model.model.num_embeddings + qwen3_model.model.num_metaqueries + 2, mean_resizing=False)
     for name, param in qwen3_model.visual.named_parameters():
         del param
     for name, buf in qwen3_model.visual.named_buffers():
         del buf
     torch.cuda.empty_cache()
-
-    def freeze_hook(grad):
-        print(f"HOOK CALLED on [{qwen3_model.model.num_embeddings} / {grad.shape[0]}], old grad max:", grad[:qwen3_model.model.num_embeddings].abs().max(), grad[qwen3_model.model.num_embeddings:].abs().max())
-        grad[: qwen3_model.model.num_embeddings].zero_()
-        print(f"HOOK CALLED on [{qwen3_model.model.num_embeddings} / {grad.shape[0]}], new grad max:", grad[:qwen3_model.model.num_embeddings].abs().max(), grad[qwen3_model.model.num_embeddings:].abs().max())
-        return grad
 
     encoder = Qwen3Encoder(
         Qwen3VLTextConfig(
@@ -866,8 +856,6 @@ def main():
         nn.Linear(4096, 4096),
         norm,
     )
-
-    qwen3_model.language_model.embed_tokens.weight.register_hook(freeze_hook)
     qwen3_model.lm_head = nn.Identity()
 
     qwen3_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-VL-2B-Instruct")
@@ -877,23 +865,6 @@ def main():
     qwen3_tokenizer.system_prompt = "You will be given a video or its caption. Please describe the content of the video in detail in your own words."
     qwen3_model.model.tokenizer = qwen3_tokenizer
     qwen3_model.model.pad_token_id = getattr(qwen3_model.model.tokenizer, "tokenizer", qwen3_model.model.tokenizer).pad_token_id
-    tokenizer = getattr(qwen3_model.model.tokenizer, "tokenizer", qwen3_model.model.tokenizer)
-    tokenizer.add_special_tokens(
-        {
-            "additional_special_tokens": [
-                f"<pad_token_{i}>"
-                for i in range(qwen3_model.model.num_embeddings - len(tokenizer))
-            ]
-        }
-    )
-    tokenizer.add_special_tokens(
-        {
-            "additional_special_tokens": ["<begin_of_vid>", "<end_of_vid>"]
-            + [f"<vid{i}>" for i in range(qwen3_model.model.tokenizer.num_metaqueries)]
-        }
-    )
-    qwen3_model.model.boi_token_id = tokenizer.convert_tokens_to_ids("<begin_of_vid>")
-    qwen3_model.model.eoi_token_id = tokenizer.convert_tokens_to_ids("<end_of_vid>")
 
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -1900,8 +1871,18 @@ def main():
                     task_type='understanding',
                 ).logits
                 # Get positions for all sequences in batch at once
-                boi_pos = torch.where(batch['input_ids'] == qwen3_model.model.boi_token_id)[1]
-                eoi_pos = torch.where(batch['input_ids'] == qwen3_model.model.eoi_token_id)[1]
+                input_ids = batch['input_ids']
+                device = input_ids.device
+                B, L = input_ids.shape
+                start_pattern = torch.tensor([151644, 872, 198], device=device)
+                end_pattern   = torch.tensor([151645, 198], device=device)
+                start_match = (input_ids.unfold(1, 3, 1) == start_pattern).all(-1)  # (B, L-2)
+                end_match   = (input_ids.unfold(1, 2, 1) == end_pattern).all(-1)    # (B, L-1)
+                boi_pos = start_match.float().argmax(dim=1)  
+                indices = torch.arange(L - 1, device=device)
+                end_match = end_match & (indices[None, :] > boi_pos[:, None])
+                eoi_pos = end_match.float().argmax(dim=1) 
+                boi_pos = boi_pos + 2
 
                 # Create mask for selecting tokens between BOI and EOI
                 batch_size, seq_len_vlm = batch['input_ids'].shape
