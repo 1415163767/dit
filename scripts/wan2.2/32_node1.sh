@@ -9,7 +9,7 @@ accelerate launch \
   --use_deepspeed \
   --zero_stage 2 \
   --num_machines 4 \
-  --machine_rank 0 \
+  --machine_rank 1 \
   --main_process_ip 100.65.39.116 \
   --main_process_port 29500 \
   --num_processes 32 \
