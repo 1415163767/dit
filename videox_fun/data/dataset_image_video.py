@@ -160,11 +160,11 @@ class ImageVideoDataset(Dataset):
         print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
         '''
 
-        # pretrain_data_path = "/blob/dyb/processed_data/koala/video_captions_all.json"
-        # print(f"Loading from {pretrain_data_path} ...")
-        # with open(pretrain_data_path, 'r', encoding='utf-8') as f:
-        #     list_data_dict = json.load(f)
-        # print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
+        pretrain_data_path = "/blob/dyb/processed_data/koala/video_captions_all.json"
+        print(f"Loading from {pretrain_data_path} ...")
+        with open(pretrain_data_path, 'r', encoding='utf-8') as f:
+            list_data_dict = json.load(f)
+        print(f"[OK] {pretrain_data_path} | entries: {len(list_data_dict)}")
         pretrain_data_path = "/blob/dyb/processed_data/IPOW_VIDU/test_videos_dataset.json"
         print(f"Loading from {pretrain_data_path} ...")
         with open(pretrain_data_path, 'r', encoding='utf-8') as f:
