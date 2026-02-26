@@ -1,6 +1,6 @@
 export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.2-TI2V-5B"
 export DATA_PATH="/blob/dyb/processed_data"
-export OUTPUT="/blob/dyb_output/icml2026/qwen3vl_2b_metaquery_cn"
+export OUTPUT="/blob/dyb_output/icml2026/qwen3vl_2b_qwen_image_cn"
 NCCL_DEBUG=INFO
 
 export WANDB_PROJECT="icml_2026_dit_ablation"
@@ -9,8 +9,8 @@ accelerate launch \
   --use_deepspeed \
   --zero_stage 2 \
   --num_machines 4 \
-  --machine_rank 2 \
-  --main_process_ip 100.65.105.125 \
+  --machine_rank 0 \
+  --main_process_ip 100.65.39.116 \
   --main_process_port 29500 \
   --num_processes 32 \
   --deepspeed_config_file config/zero_stage2_config.json \
