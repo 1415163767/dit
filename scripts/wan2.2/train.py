@@ -1891,6 +1891,7 @@ def main():
 
                 new_prompt_embeds = new_prompt_embeds[mask].view(batch_size, -1, new_prompt_embeds.size(-1))
                 new_prompt_embeds = transformer3d.connector(new_prompt_embeds)
+                new_prompt_embeds = new_prompt_embeds[:, :transformer3d.text_len]
                 prompt_embeds = [new_prompt_embeds[0]]
 
                 # Predict the noise residual
