@@ -17,7 +17,7 @@ accelerate launch \
   --deepspeed_config_file config/zero_stage2_config.json \
   --deepspeed_multinode_launcher standard \
   scripts/wan2.1/train.py \
-  --config_path="config/wan2.1/wan_civitai_5b.yaml" \
+  --config_path="config/wan2.1/wan_civitai.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATA_PATH \
   --vq_model_path=$VQ_PATH \
