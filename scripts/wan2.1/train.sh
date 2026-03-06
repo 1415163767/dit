@@ -4,7 +4,12 @@ export DATA_PATH="/blob/dyb/processed_data"
 export OUTPUT="/blob/dyb_output/icml2026/dit_1.3B_original_res"
 NCCL_DEBUG=INFO
 
-accelerate launch --deepspeed_config_file config/zero_stage2_config.json scripts/wan2.1/train.py \
+accelerate launch \
+  --use_deepspeed \
+  --zero_stage 2 \
+  --deepspeed_config_file config/zero_stage2_config.json \
+  --deepspeed_multinode_launcher standard \
+  scripts/wan2.1/train.py \
   --config_path="config/wan2.1/wan_civitai.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATA_PATH \
@@ -30,6 +35,7 @@ accelerate launch --deepspeed_config_file config/zero_stage2_config.json scripts
   --adam_epsilon=1e-10 \
   --vae_mini_batch=1 \
   --max_grad_norm=0.05 \
+  --mixed_precision="bf16" \
   --random_hw_adapt \
   --training_with_video_token_length \
   --uniform_sampling \
