@@ -77,6 +77,9 @@ from videox_fun.pipeline import WanPipeline, WanI2VPipeline
 from videox_fun.utils.discrete_sampler import DiscreteSampling
 from videox_fun.utils.utils import get_image_to_video_latent, save_videos_grid
 
+# qwen3_vl
+from qwen3_vl import Qwen3VLForConditionalGeneration
+
 if is_wandb_available():
     import wandb
 
@@ -1797,7 +1800,6 @@ def main():
                 if args.low_vram:
                     qwen3_vit.to('cpu')
                     torch.cuda.empty_cache()
-                import pdb; pdb.set_trace()
 
                 # Predict the noise residual
                 with torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
