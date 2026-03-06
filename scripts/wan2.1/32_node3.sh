@@ -1,0 +1,52 @@
+export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.1-T2V-1.3B"
+export VQ_PATH="/blob/dyb_output/icml2026/multiple_codebook_ema_scale_image_video/checkpoint-963425/model.safetensors"
+export DATA_PATH="/blob/dyb/processed_data"
+export OUTPUT="/blob/dyb_output/icml2026/dit_1.3B_original_res"
+NCCL_DEBUG=INFO
+
+export WANDB_PROJECT="icml_2026_dit_ablation"
+
+accelerate launch \
+  --use_deepspeed \
+  --zero_stage 2 \
+  --num_machines 4 \
+  --machine_rank 3 \
+  --main_process_ip 100.65.129.85 \
+  --main_process_port 29500 \
+  --num_processes 32 \
+  --deepspeed_config_file config/zero_stage2_config.json \
+  --deepspeed_multinode_launcher standard \
+  scripts/wan2.2/train.py \
+  --config_path="config/wan2.2/wan_civitai_5b.yaml" \
+  --pretrained_model_name_or_path=$MODEL_NAME \
+  --train_data_dir=$DATA_PATH \
+  --vq_model_path=$VQ_PATH \
+  --video_sample_stride=1 \
+  --vit_sample_stride=2 \
+  --video_sample_n_frames=121 \
+  --resolution_list "(480,832)" "(832,480)" \
+  --train_batch_size=1 \
+  --resume_from_checkpoint "latest" \
+  --gradient_accumulation_steps=1 \
+  --dataloader_num_workers=8 \
+  --num_train_epochs=1 \
+  --checkpointing_steps=5000 \
+  --learning_rate=2e-05 \
+  --lr_scheduler="constant_with_warmup" \
+  --lr_warmup_steps=300 \
+  --seed=42 \
+  --gradient_checkpointing \
+  --output_dir=$OUTPUT \
+  --adam_weight_decay=3e-2 \
+  --adam_epsilon=1e-10 \
+  --vae_mini_batch=1 \
+  --max_grad_norm=0.05 \
+  --mixed_precision="bf16" \
+  --random_hw_adapt \
+  --training_with_video_token_length \
+  --uniform_sampling \
+  --train_mode="normal" \
+  --trainable_modules "." \
+  --report_to wandb
+
+python /blob/thinking.py
