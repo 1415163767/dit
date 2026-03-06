@@ -759,6 +759,15 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # Get VQ Model and load weights
+    qwen3_model = Qwen3VLForConditionalGeneration.from_pretrained("Qwen/Qwen3-VL-2B-Instruct", dtype="auto")
+    from safetensors.torch import load_file
+    print(f"Load ViT from Path: {args.vq_model_path}")
+    visual = load_file(args.vq_model_path)
+    qwen3_model.visual.load_state_dict(visual, strict=False)   
+    qwen3_vit = qwen3_model.visual
+    del qwen3_model
+    torch.cuda.empty_cache()
 
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -925,6 +934,7 @@ def main():
     # Freeze vae and text_encoder and set transformer3d to trainable
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
+    qwen3_vit.requires_grad_(False)
     transformer3d.requires_grad_(False)
     if args.train_mode != "normal":
         clip_image_encoder.requires_grad_(False)
@@ -1421,6 +1431,7 @@ def main():
 
     # Move text_encode and vae to gpu and cast to weight_dtype
     vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
+    qwen3_vit.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
         text_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
     if args.train_mode != "normal":
@@ -1728,6 +1739,7 @@ def main():
 
                 if args.low_vram and not args.enable_text_encoder_in_dataloader:
                     text_encoder.to('cpu')
+                    qwen3_vit.to(accelerator.device)
                     torch.cuda.empty_cache()
 
                 bsz, channel, num_frames, height, width = latents.size()
@@ -1776,6 +1788,17 @@ def main():
                     target_shape[1]
                 )
 
+                with torch.no_grad():
+                    vit_features = []
+                    for embeds, grid in zip(batch['vit_values'], batch['grid_thw']):
+                        new_embeds = qwen3_vit(embeds, grid_thw=grid)[0]
+                        vit_features.append(new_embeds)
+
+                if args.low_vram:
+                    qwen3_vit.to('cpu')
+                    torch.cuda.empty_cache()
+                import pdb; pdb.set_trace()
+
                 # Predict the noise residual
                 with torch.cuda.amp.autocast(dtype=weight_dtype), torch.cuda.device(device=accelerator.device):
                     noise_pred = transformer3d(
@@ -1785,6 +1808,7 @@ def main():
                         seq_len=seq_len,
                         y=inpaint_latents if args.train_mode != "normal" else None,
                         clip_fea=clip_context if args.train_mode != "normal" else None,
+                        vit_fea=vit_features,
                     )
                 
                 def custom_mse_loss(noise_pred, target, weighting=None, threshold=50):
