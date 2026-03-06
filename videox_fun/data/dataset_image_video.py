@@ -188,7 +188,7 @@ class ImageVideoDataset(Dataset):
 
         # ViT params
         self.vit_sample_stride = vit_sample_stride
-        self.processor.video_processor.size['longest_edge'] = 83886080
+        self.processor.video_processor.size['longest_edge'] = 883886080
 
     def sample_indexes(self, video_length, sample_n_frames):
         clip_length  = min(video_length, (sample_n_frames - 1) * self.video_sample_stride + 1)
