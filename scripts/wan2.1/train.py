@@ -1024,11 +1024,15 @@ def main():
                 with open(os.path.join(output_dir, "sampler_pos_start.pkl"), 'wb') as file:
                     pickle.dump([batch_sampler.sampler._pos_start, first_epoch], file)
                 try:
-                    accelerate_state_dict = accelerator.get_state_dict(models[-1], unwrap=True)
+                    # accelerate_state_dict = accelerator.get_state_dict(models[-1], unwrap=True)
+
+                    unwrapped = accelerator.unwrap_model(models[-1])
+                    state_dict = unwrapped._zero3_consolidated_16bit_state_dict()
 
                     from safetensors.torch import save_file
                     safetensor_save_path = os.path.join(output_dir, "diffusion_pytorch_model.safetensors")
-                    save_file(accelerate_state_dict, safetensor_save_path, metadata={"format": "pt"})
+                    # save_file(accelerate_state_dict, safetensor_save_path, metadata={"format": "pt"})
+                    save_file(state_dict, safetensor_save_path, metadata={"format": "pt"})
         
                 except Exception as e:
                     print("Skip saving full model under ZeRO3:", e)
