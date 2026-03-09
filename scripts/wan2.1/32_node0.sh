@@ -23,14 +23,14 @@ accelerate launch \
   --vq_model_path=$VQ_PATH \
   --video_sample_stride=1 \
   --vit_sample_stride=2 \
-  --video_sample_n_frames=121 \
+  --video_sample_n_frames=81 \
   --resolution_list "(480,832)" "(832,480)" \
   --train_batch_size=1 \
   --resume_from_checkpoint "latest" \
   --gradient_accumulation_steps=1 \
   --dataloader_num_workers=4 \
   --num_train_epochs=1 \
-  --checkpointing_steps=10 \
+  --checkpointing_steps=5000 \
   --learning_rate=2e-05 \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=300 \
