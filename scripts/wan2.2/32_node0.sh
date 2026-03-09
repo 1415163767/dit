@@ -31,7 +31,7 @@ accelerate launch \
   --gradient_accumulation_steps=1 \
   --dataloader_num_workers=8 \
   --num_train_epochs=1 \
-  --checkpointing_steps=5000 \
+  --checkpointing_steps=10 \
   --learning_rate=2e-05 \
   --lr_scheduler="cosine" \
   --lr_warmup_ratio=0.03 \
