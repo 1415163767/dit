@@ -8,13 +8,13 @@ export WANDB_PROJECT="icml_2026_dit_ablation"
 
 accelerate launch \
   --use_deepspeed \
-  --zero_stage 2 \
+  --zero_stage 3 \
   --num_machines 4 \
   --machine_rank 0 \
   --main_process_ip 100.65.129.85 \
   --main_process_port 29500 \
   --num_processes 32 \
-  --deepspeed_config_file config/zero_stage2_config.json \
+  --deepspeed_config_file config/zero_stage3_config_cpu_offload.json \
   --deepspeed_multinode_launcher standard \
   scripts/wan2.1/train.py \
   --config_path="config/wan2.1/wan_civitai.yaml" \
@@ -23,14 +23,14 @@ accelerate launch \
   --vq_model_path=$VQ_PATH \
   --video_sample_stride=1 \
   --vit_sample_stride=2 \
-  --video_sample_n_frames=81 \
+  --video_sample_n_frames=121 \
   --resolution_list "(480,832)" "(832,480)" \
   --train_batch_size=1 \
   --resume_from_checkpoint "latest" \
   --gradient_accumulation_steps=1 \
   --dataloader_num_workers=4 \
   --num_train_epochs=1 \
-  --checkpointing_steps=5000 \
+  --checkpointing_steps=10 \
   --learning_rate=2e-05 \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=300 \
