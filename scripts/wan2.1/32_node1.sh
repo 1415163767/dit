@@ -8,13 +8,13 @@ export WANDB_PROJECT="icml_2026_dit_ablation"
 
 accelerate launch \
   --use_deepspeed \
-  --zero_stage 2 \
+  --zero_stage 3 \
   --num_machines 4 \
   --machine_rank 1 \
   --main_process_ip 100.65.129.85 \
   --main_process_port 29500 \
   --num_processes 32 \
-  --deepspeed_config_file config/zero_stage2_config.json \
+  --deepspeed_config_file config/zero_stage3_config_cpu_offload.json \
   --deepspeed_multinode_launcher standard \
   scripts/wan2.1/train.py \
   --config_path="config/wan2.1/wan_civitai.yaml" \
