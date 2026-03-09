@@ -1,7 +1,7 @@
 export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.1-T2V-1.3B"
 export VQ_PATH="/blob/dyb_output/icml2026/multiple_codebook_ema_scale_image_video/checkpoint-963425/model.safetensors"
 export DATA_PATH="/blob/dyb/processed_data"
-export OUTPUT="/blob/dyb_output/icml2026/dit_1.3B_original_res"
+export OUTPUT="/blob/dyb_output/icml2026/dit_1.3B_original_res_new"
 NCCL_DEBUG=INFO
 
 export WANDB_PROJECT="icml_2026_dit_ablation"
@@ -28,9 +28,9 @@ accelerate launch \
   --train_batch_size=1 \
   --resume_from_checkpoint "latest" \
   --gradient_accumulation_steps=1 \
-  --dataloader_num_workers=8 \
+  --dataloader_num_workers=4 \
   --num_train_epochs=1 \
-  --checkpointing_steps=5000 \
+  --checkpointing_steps=10 \
   --learning_rate=2e-05 \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=300 \
