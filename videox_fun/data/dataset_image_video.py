@@ -110,6 +110,7 @@ class ImageVideoDataset(Dataset):
         data_dir,
         video_sample_stride=1, video_sample_n_frames=33, vit_sample_stride=2,
         resolution_list=[(384, 384), (288, 512), (512, 288)],
+        dit_resolution_list=[(1280,704), (704,1280)],
         text_drop_ratio=0.1,
         enable_bucket=False,
         video_length_drop_start=0.0, 
@@ -175,6 +176,7 @@ class ImageVideoDataset(Dataset):
         self.video_sample_stride    = video_sample_stride
         self.video_sample_n_frames  = video_sample_n_frames
         self.resolution_list        = resolution_list
+        self.dit_resolution_list    = dit_resolution_list
         self.video_transforms = transforms.Compose(
             [
                 transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
@@ -231,33 +233,46 @@ class ImageVideoDataset(Dataset):
             
         else:
             raise ValueError(f"Unsupported video_file_path type: {type(video_file_path)}")
-        
+
+        # For ViT and DiT
         processed_frames = []
+        processed_frames_dit = []
         h, w, _ = pixel_values[0].shape
         tgt_h, tgt_w = min(self.resolution_list, key=lambda r: abs((r[1] / r[0]) - (w / h)))
+        tgt_h_dit, tgt_w_dit = min(self.dit_resolution_list, key=lambda r: abs((r[1] / r[0]) - (w / h)))
         scale = max(tgt_h / h, tgt_w / w)
+        scale_dit = max(tgt_h_dit / h, tgt_w_dit / w)
         new_h, new_w = int(np.ceil(h * scale)), int(np.ceil(w * scale))
+        new_h_dit, new_w_dit = int(np.ceil(h * scale_dit)), int(np.ceil(w * scale_dit))
         new_h = max(new_h, tgt_h)
         new_w = max(new_w, tgt_w)
+        new_h_dit = max(new_h_dit, tgt_h_dit)
+        new_w_dit = max(new_w_dit, tgt_w_dit)
         sh = max(0, (new_h - tgt_h) // 2)
         sw = max(0, (new_w - tgt_w) // 2)
+        sh_dit = max(0, (new_h_dit - tgt_h_dit) // 2)
+        sw_dit = max(0, (new_w_dit - tgt_w_dit) // 2)
         for i in range(len(pixel_values)):
             frame = pixel_values[i]
             resized_frame = cv2.resize(frame, (new_w, new_h))
+            resized_frame_dit = cv2.resize(frame, (new_w_dit, new_h_dit))
             cropped_frame = resized_frame[sh:sh + tgt_h, sw:sw + tgt_w]
+            cropped_frame_dit = resized_frame_dit[sh_dit:sh_dit + tgt_h_dit, sw_dit:sw_dit + tgt_w_dit]
             processed_frames.append(cropped_frame)
+            processed_frames_dit.append(cropped_frame_dit)
         pixel_values = torch.from_numpy(np.stack(processed_frames, axis=0))  # (T, H, W, C)
         pixel_values_for_vit = pixel_values[::self.vit_sample_stride].permute(0, 3, 1, 2).contiguous()
+        pixel_values_for_dit = torch.from_numpy(np.stack(processed_frames_dit, axis=0))  # (T, H, W, C)
         vit_values, gird_thw = self.processor.video_processor.preprocess(pixel_values_for_vit, do_sample_frames=False).values()
 
         if not self.enable_bucket:
-            pixel_values = pixel_values.permute(0, 3, 1, 2).contiguous()
-            pixel_values = pixel_values / 127.5 - 1.0  # [-1, 1]
+            pixel_values_for_dit = pixel_values_for_dit.permute(0, 3, 1, 2).contiguous()
+            pixel_values_for_dit = pixel_values_for_dit / 127.5 - 1.0  # [-1, 1]
             del video_reader
         else:
-            pixel_values = self.video_transforms(pixel_values)
+            pixel_values_for_dit = self.video_transforms(pixel_values_for_dit)
 
-        return pixel_values, vit_values, gird_thw
+        return pixel_values_for_dit, vit_values, gird_thw
         
 
     def get_batch(self, idx):
