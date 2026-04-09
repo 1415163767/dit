@@ -1880,10 +1880,12 @@ def main():
                         timesteps = mask.new_ones(mask_bs, seq_len) * timesteps[:, None,]
 
                 with torch.no_grad():
-                    vit_features = []
-                    for embeds, grid in zip(batch['vit_values'], batch['grid_thw']):
-                        new_embeds = qwen3_vit(embeds, grid_thw=grid)[0]
-                        vit_features.append(new_embeds)
+                    vit_features = {}
+                    embeds = batch['vit_values'][0]
+                    grid = batch['grid_thw'][0]
+                    vit_features['video_embeds'] = qwen3_vit(embeds, grid_thw=grid)[0]
+                    vit_features['video_grid_thw'] = grid[0]
+                    print(vit_features['video_embeds'].shape, vit_features['video_grid_thw'], vit_features['video_grid_thw'].shape)
 
                 if args.low_vram:
                     qwen3_vit.to('cpu')
@@ -1897,7 +1899,7 @@ def main():
                         t=timesteps,
                         seq_len=seq_len,
                         y=inpaint_latents if args.train_mode != "normal" and args.train_mode != "ti2v" else None,
-                        vit_fea=vit_features,
+                        vit_features=vit_features,
                     )
                 
                 def custom_mse_loss(noise_pred, target, weighting=None, threshold=50):
