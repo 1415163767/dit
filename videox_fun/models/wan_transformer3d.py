@@ -796,28 +796,19 @@ class ViTFeatureUpsampler(nn.Module):
         super().__init__()
         self.out_dim = out_dim
         self.factor = upsample_factor
-        # 在低分辨率下先做维度投影
         self.pre_proj = nn.Linear(in_dim, out_dim)
-        # 卷积 + PixelShuffle 实现 1 个 Patch 分裂为 4 个
-        # mid_dim = out_dim * 4 (因为 factor=2, 2^2=4)
-        self.conv_upsample = nn.Sequential(
-            nn.Conv2d(out_dim, out_dim * (upsample_factor ** 2), kernel_size=3, padding=1),
-            nn.PixelShuffle(upsample_factor),
-            nn.GELU()
-        )
 
-    def forward(self, vit_feat, T, H, W):
+    def forward(self, vit_feat, T, H, W, target_H, target_W):
         B, L, C = vit_feat.shape
         # 1. 维度投影
         x = self.pre_proj(vit_feat) # [B, L, out_dim]
         # 2. 还原空间结构，准备卷积
         x = x.transpose(1, 2).view(B, self.out_dim, T, H, W)
-        # 3. 逐帧上采样 (将 T 维度并入 Batch)
+        # 3. 逐帧上采样 (将 T 维度并入 Batch) 
         x_frames = x.permute(0, 2, 1, 3, 4).contiguous().view(B * T, self.out_dim, H, W)
-        x_upsampled = self.conv_upsample(x_frames) # [B*T, out_dim, H*2, W*2]
+        x_upsampled = F.interpolate(x_frames, size=(target_H, target_W), mode='bilinear', align_corners=False)
         # 4. 拉平回序列
-        _, _, H_new, W_new = x_upsampled.shape
-        x_final = x_upsampled.view(B, T, self.out_dim, H_new, W_new)
+        x_final = x_upsampled.view(B, T, self.out_dim, target_H, target_W)
         return x_final.permute(0, 2, 1, 3, 4).flatten(2).transpose(1, 2)
 
 WAN_CROSSATTENTION_CLASSES = {
@@ -1062,7 +1053,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         
         # 1. 维度对齐层 (将 ViT 的 2048 投影到 Wan2.2 的 3072)
         # self.vit_proj = nn.Linear(2048, self.dim)
-        self.vit_upsampler = ViTFeatureUpsampler(in_dim=2048, out_dim=self.dim, upsample_factor=2) 
+        self.vit_upsampler = ViTFeatureUpsampler(in_dim=2048, out_dim=self.dim)
 
         # self.start_idx = 0
         # self.end_idx = self.num_layers - 1
@@ -1382,11 +1373,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             # 拿到原始的全局结构
             T_v, H_v, W_v = vit_features["video_grid_thw"][0]
             # 对完整的 Tensor 进行上采样，确保空间结构不被破坏
-            print(f"Before upsampling, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} T H W: {T_v} {H_v} {W_v}")
+            # print(f"Before upsampling, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} T H W: {T_v} {H_v} {W_v}")
             vit_feat = self.vit_upsampler(
-                vit_features["video_embeds"], T_v, H_v, W_v
+                vit_features["video_embeds"], T_v, H_v, W_v, grid_sizes[0][1].item(), grid_sizes[0][2].item()
             )
-            print(f"After upsampling, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} T H W: {T_v} {H_v} {W_v}")
+            # print(f"After upsampling, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} T H W: {T_v} {H_v} {W_v}")
 
         # Context Parallel
         if self.sp_world_size > 1:
@@ -1399,7 +1390,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                     self.sp_world_size, 
                     dim=1
                 )[self.sp_world_rank]
-                print(f"After context parallel split, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} x shape: {x.shape}")
+                # print(f"After context parallel split, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} x shape: {x.shape}")
 
                 # 如果你的 vit_features 中包含 seq_len，也需要更新为局部长度
                 if "seq_len" in vit_features:
