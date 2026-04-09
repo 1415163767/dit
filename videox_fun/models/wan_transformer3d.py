@@ -13,19 +13,383 @@ import numpy as np
 import torch
 import torch.cuda.amp as amp
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.utils import is_torch_version, logging
 from torch import nn
 
+# from ..dist import (get_sequence_parallel_rank,
+#                     get_sequence_parallel_world_size, get_sp_group,
+#                     usp_attn_forward, xFuserLongContextAttention)
 from ..dist import (get_sequence_parallel_rank,
                     get_sequence_parallel_world_size, get_sp_group,
-                    usp_attn_forward, xFuserLongContextAttention)
+                    xFuserLongContextAttention)
 from ..utils import cfg_skip
 from .attention_utils import attention
 from .cache_utils import TeaCache
 from .wan_camera_adapter import SimpleAdapter
+
+try:
+    import flash_attn_interface
+    FLASH_ATTN_3_AVAILABLE = True
+except ModuleNotFoundError:
+    FLASH_ATTN_3_AVAILABLE = False
+
+try:
+    import flash_attn
+    FLASH_ATTN_2_AVAILABLE = True
+except ModuleNotFoundError:
+    FLASH_ATTN_2_AVAILABLE = False
+
+try:
+    major, minor = torch.cuda.get_device_capability(0)
+    if f"{major}.{minor}" == "8.0":
+        from sageattention_sm80 import sageattn
+        SAGE_ATTENTION_AVAILABLE = True
+    elif f"{major}.{minor}" == "8.6":
+        from sageattention_sm86 import sageattn
+        SAGE_ATTENTION_AVAILABLE = True
+    elif f"{major}.{minor}" == "8.9":
+        from sageattention_sm89 import sageattn
+        SAGE_ATTENTION_AVAILABLE = True
+    elif f"{major}.{minor}" == "9.0":
+        from sageattention_sm90 import sageattn
+        SAGE_ATTENTION_AVAILABLE = True
+    elif major>9:
+        from sageattention_sm120 import sageattn
+        SAGE_ATTENTION_AVAILABLE = True
+except:
+    try:
+        from sageattention import sageattn
+        SAGE_ATTENTION_AVAILABLE = True
+    except:
+        sageattn = None
+        SAGE_ATTENTION_AVAILABLE = False
+
+import torch.distributed as dist
+
+class NativeUlyssesAllToAll(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, group, scatter_dim, gather_dim):
+        ctx.group = group
+        ctx.scatter_dim = scatter_dim
+        ctx.gather_dim = gather_dim
+        
+        world_size = dist.get_world_size(group)
+        sp_rank = dist.get_rank(group)
+        
+        if world_size <= 1:
+            return tensor
+            
+        original_shape = list(tensor.shape)
+        assert original_shape[scatter_dim] % world_size == 0, f"Dim {scatter_dim} must be divisible by {world_size}"
+        
+        # if sp_rank == 0:
+        #     print(f"🌊 [Ulysses 前向] 0. 初始输入: {original_shape} | 准备切分(Scatter)维度: {scatter_dim}, 准备聚合(Gather)维度: {gather_dim}")
+
+        # ==========================================
+        # 1. 拆分 Scatter 维度 (变成 5D)
+        # 例如: [B, S, H, D] -> [B, S, P, H/P, D]
+        # ==========================================
+        shape_5d = original_shape.copy()
+        shape_5d[scatter_dim] = shape_5d[scatter_dim] // world_size
+        shape_5d.insert(scatter_dim, world_size)
+        tensor_5d = tensor.view(*shape_5d)
+        
+        # ==========================================
+        # 2. 将 world_size (P) 移到第 0 维，供底层的物理发送
+        # 动态计算 permute 索引，把 P 提到最前面
+        # 例如: [B, S, P, H/P, D] -> [P, B, S, H/P, D]
+        # ==========================================
+        permute_send = [scatter_dim] + [i for i in range(len(shape_5d)) if i != scatter_dim]
+        send_tensor = tensor_5d.permute(*permute_send).contiguous()
+        
+        # if sp_rank == 0:
+        #     print(f"🌊 [Ulysses 前向] 1. 准备发送 (P移至dim 0): {list(send_tensor.shape)}")
+
+        # ==========================================
+        # 3. 物理 All-to-All 通信 (互相发牌)
+        # ==========================================
+        recv_tensor = torch.empty_like(send_tensor)
+        dist.all_to_all_single(recv_tensor, send_tensor, group=group)
+        
+        # if sp_rank == 0:
+        #     print(f"🌊 [Ulysses 前向] 2. 接收完毕: {list(recv_tensor.shape)}")
+
+        # ==========================================
+        # 4. 把接收到的 P (位于 dim 0) 移动到 Gather 维度的旁边
+        # 动态计算 permute 索引，把 P 插回去
+        # ==========================================
+        permute_recv = [i+1 for i in range(gather_dim)] + [0] + [i+1 for i in range(gather_dim, len(original_shape))]
+        out_5d = recv_tensor.permute(*permute_recv).contiguous()
+        
+        # if sp_rank == 0:
+        #     print(f"🌊 [Ulysses 前向] 3. 移至聚合位置: {list(out_5d.shape)}")
+
+        # ==========================================
+        # 5. 合并 P 和 Gather 维度 (变回 4D)
+        # 例如: [B, P, S, H/P, D] -> [B, P*S, H/P, D]
+        # ==========================================
+        final_shape = original_shape.copy()
+        final_shape[scatter_dim] = final_shape[scatter_dim] // world_size
+        final_shape[gather_dim] = final_shape[gather_dim] * world_size
+        out = out_5d.view(*final_shape)
+        
+        # if sp_rank == 0:
+        #     print(f"🌊 [Ulysses 前向] 4. 最终输出: {list(out.shape)}\n" + "-"*50)
+
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        sp_rank = dist.get_rank(ctx.group)
+        
+        # if sp_rank == 0:
+        #     print(f"🔙 [Ulysses 反向] 0. 收到梯度输入: {list(grad_output.shape)} | 将被切分: {ctx.gather_dim}, 将被聚合: {ctx.scatter_dim}")
+            
+        # 反向传播是一个完美的镜像魔法：直接把前向的 gather 和 scatter 参数对调传进去！
+        grad_output = grad_output.contiguous()
+        grad_input = NativeUlyssesAllToAll.apply(grad_output, ctx.group, ctx.gather_dim, ctx.scatter_dim)
+        
+        # if sp_rank == 0:
+        #     print(f"🔙 [Ulysses 反向] 1. 最终传回给模型的梯度: {list(grad_input.shape)}\n" + "="*50)
+            
+        return grad_input, None, None, None
+
+def usp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16, t=0, **kwargs):
+    """
+    纯血版 Ulysses Attention: 
+    完全基于 PyTorch native all_to_all_single 和 flash_attn_func，
+    0 黑盒，100% 完美支持 Autograd。
+    """
+    # 1. 准备 SP 通信组信息 (从你的拦截器里拿)
+    sp_group_obj = get_sp_group()
+    sp_size = get_sequence_parallel_world_size() if sp_group_obj is not None else 1
+    sp_rank = get_sequence_parallel_rank() if sp_group_obj is not None else 0
+
+    # 2. 前置准备：使用模型原有的 qkv_fn 生成 Query, Key, Value
+    b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+    q = self.norm_q(self.q(x.to(dtype))).view(b, s, n, d)
+    k = self.norm_k(self.k(x.to(dtype))).view(b, s, n, d)
+    v = self.v(x.to(dtype)).view(b, s, n, d)
+
+    # 3. 应用 RoPE 位置编码 (直接调用同文件里的函数，并传入 SP 截断信息)
+    # ✨ 核心修复：直接调用，且带上 sp_size 和 sp_rank
+    q, k = rope_apply_qk(q, k, grid_sizes, freqs, sp_size=sp_size, sp_rank=sp_rank)
+    
+    # 4. 如果没有开启序列并行，或者组为空，直接算 Attention 并返回
+    if sp_group_obj is None or sp_group_obj.size() <= 1:
+        x = attention(
+            q.to(dtype), 
+            k.to(dtype), 
+            v.to(dtype),
+            k_lens=seq_lens,
+            window_size=self.window_size
+        )
+        x = x.to(dtype)
+        x = x.flatten(2)
+        x = self.o(x)
+        return x
+        
+    group = sp_group_obj.group
+    
+    # [Ulysses 步骤 1: 准备输入] 
+    # 对于 q, k, v 我们需要在第 2 维 (num_heads) 聚集，第 1 维 (seq_len) 切散
+    q_all = NativeUlyssesAllToAll.apply(q, group, 2, 1)
+    k_all = NativeUlyssesAllToAll.apply(k, group, 2, 1)
+    v_all = NativeUlyssesAllToAll.apply(v, group, 2, 1)
+
+    # [Ulysses 步骤 2: 计算 Attention]
+    x_out = attention(
+        q_all.to(dtype), 
+        k_all.to(dtype), 
+        v_all.to(dtype),
+        k_lens=seq_lens,
+        window_size=self.window_size
+    )
+
+    # [Ulysses 步骤 3: 拼回原来的形状]
+    x_final = NativeUlyssesAllToAll.apply(x_out, group, 1, 2)
+    
+    x_final = x_final.to(dtype)
+    x_final = x_final.flatten(2)
+    x_final = self.o(x_final)
+    
+    return x_final
+
+def flash_attention(
+    q,
+    k,
+    v,
+    q_lens=None,
+    k_lens=None,
+    dropout_p=0.,
+    softmax_scale=None,
+    q_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    deterministic=False,
+    dtype=torch.bfloat16,
+    version=None,
+):
+    """
+    q:              [B, Lq, Nq, C1].
+    k:              [B, Lk, Nk, C1].
+    v:              [B, Lk, Nk, C2]. Nq must be divisible by Nk.
+    q_lens:         [B].
+    k_lens:         [B].
+    dropout_p:      float. Dropout probability.
+    softmax_scale:  float. The scaling of QK^T before applying softmax.
+    causal:         bool. Whether to apply causal attention mask.
+    window_size:    (left right). If not (-1, -1), apply sliding window local attention.
+    deterministic:  bool. If True, slightly slower and uses more memory.
+    dtype:          torch.dtype. Apply when dtype of q/k/v is not float16/bfloat16.
+    """
+    half_dtypes = (torch.float16, torch.bfloat16)
+    assert dtype in half_dtypes
+    assert q.device.type == 'cuda' and q.size(-1) <= 256
+
+    # params
+    b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
+
+    def half(x):
+        return x if x.dtype in half_dtypes else x.to(dtype)
+
+    # preprocess query
+    if q_lens is None:
+        q = half(q.flatten(0, 1))
+        q_lens = torch.tensor(
+            [lq] * b, dtype=torch.int32).to(
+                device=q.device, non_blocking=True)
+    else:
+        q = half(torch.cat([u[:v] for u, v in zip(q, q_lens)]))
+
+    # preprocess key, value
+    if k_lens is None:
+        k = half(k.flatten(0, 1))
+        v = half(v.flatten(0, 1))
+        k_lens = torch.tensor(
+            [lk] * b, dtype=torch.int32).to(
+                device=k.device, non_blocking=True)
+    else:
+        k = half(torch.cat([u[:v] for u, v in zip(k, k_lens)]))
+        v = half(torch.cat([u[:v] for u, v in zip(v, k_lens)]))
+
+    q = q.to(v.dtype)
+    k = k.to(v.dtype)
+
+    if q_scale is not None:
+        q = q * q_scale
+
+    if version is not None and version == 3 and not FLASH_ATTN_3_AVAILABLE:
+        warnings.warn(
+            'Flash attention 3 is not available, use flash attention 2 instead.'
+        )
+
+    # apply attention
+    if (version is None or version == 3) and FLASH_ATTN_3_AVAILABLE:
+        # Note: dropout_p, window_size are not supported in FA3 now.
+        x = flash_attn_interface.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=torch.cat([q_lens.new_zeros([1]), q_lens]).cumsum(
+                0, dtype=torch.int32).to(q.device, non_blocking=True),
+            cu_seqlens_k=torch.cat([k_lens.new_zeros([1]), k_lens]).cumsum(
+                0, dtype=torch.int32).to(q.device, non_blocking=True),
+            seqused_q=None,
+            seqused_k=None,
+            max_seqlen_q=lq,
+            max_seqlen_k=lk,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            deterministic=deterministic)[0].unflatten(0, (b, lq))
+    else:
+        assert FLASH_ATTN_2_AVAILABLE
+        x = flash_attn.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=torch.cat([q_lens.new_zeros([1]), q_lens]).cumsum(
+                0, dtype=torch.int32).to(q.device, non_blocking=True),
+            cu_seqlens_k=torch.cat([k_lens.new_zeros([1]), k_lens]).cumsum(
+                0, dtype=torch.int32).to(q.device, non_blocking=True),
+            max_seqlen_q=lq,
+            max_seqlen_k=lk,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic).unflatten(0, (b, lq))
+
+    # output
+    return x.type(out_dtype)
+
+
+def attention(
+    q,
+    k,
+    v,
+    q_lens=None,
+    k_lens=None,
+    dropout_p=0.,
+    softmax_scale=None,
+    q_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    deterministic=False,
+    dtype=torch.bfloat16,
+    fa_version=None,
+    attention_type=None,
+):
+    attention_type = os.environ.get("VIDEOX_ATTENTION_TYPE", "FLASH_ATTENTION") if attention_type is None else attention_type
+    if torch.is_grad_enabled() and attention_type == "SAGE_ATTENTION":
+        attention_type = "FLASH_ATTENTION"
+
+    if attention_type == "SAGE_ATTENTION" and SAGE_ATTENTION_AVAILABLE:
+        if q_lens is not None or k_lens is not None:
+            warnings.warn(
+                'Padding mask is disabled when using scaled_dot_product_attention. It can have a significant impact on performance.'
+            )
+        attn_mask = None
+
+        out = sageattn(
+            q, k, v, attn_mask=attn_mask, tensor_layout="NHD", is_causal=causal, dropout_p=dropout_p)
+
+    elif attention_type == "FLASH_ATTENTION" and (FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE):
+        return flash_attention(
+            q=q,
+            k=k,
+            v=v,
+            q_lens=q_lens,
+            k_lens=k_lens,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            q_scale=q_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic,
+            dtype=dtype,
+            version=fa_version,
+        )
+    else:
+        if q_lens is not None or k_lens is not None:
+            warnings.warn(
+                'Padding mask is disabled when using scaled_dot_product_attention. It can have a significant impact on performance.'
+            )
+        attn_mask = None
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
+
+        out = out.transpose(1, 2).contiguous()
+    return out
 
 
 def sinusoidal_embedding_1d(dim, position):
@@ -39,31 +403,6 @@ def sinusoidal_embedding_1d(dim, position):
         position, torch.pow(10000, -torch.arange(half).to(position).div(half)))
     x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
     return x
-
-
-def apply_dropout(tokens,
-                  cfg_drop_prob=0.1,
-                  enable_token_drop_prob=0.3,
-                  token_drop_prob=0.2,
-                  training=True,
-                  scale_by_keep=True):
-
-    if not training:
-        return tokens
-
-    # (1) CFG dropout: whole condition removed
-    if torch.rand(1).item() < cfg_drop_prob:
-        return torch.zeros_like(tokens)
-
-    # (2) Token-level dropout
-    if torch.rand(1).item() < enable_token_drop_prob:
-        keep_prob = 1 - token_drop_prob
-        shape = (tokens.shape[0], tokens.shape[1], 1)
-        random_tensor = tokens.new_empty(shape).bernoulli_(keep_prob)
-        if scale_by_keep:
-            random_tensor.div_(keep_prob)
-        tokens = tokens * random_tensor
-    return tokens
 
 
 @amp.autocast(enabled=False)
@@ -157,41 +496,75 @@ def get_resize_crop_region_for_grid(src, tgt_width, tgt_height):
     return (crop_top, crop_left), (crop_top + resize_height, crop_left + resize_width)
 
 
+# @amp.autocast(enabled=False)
+# @torch.compiler.disable()
+# def rope_apply(x, grid_sizes, freqs):
+#     n, c = x.size(2), x.size(3) // 2
+
+#     # split freqs
+#     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+
+#     # loop over samples
+#     output = []
+#     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+#         seq_len = f * h * w
+
+#         # precompute multipliers
+#         x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float32).reshape(
+#             seq_len, n, -1, 2))
+#         freqs_i = torch.cat([
+#             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+#             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+#             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+#         ],
+#                             dim=-1).reshape(seq_len, 1, -1)
+
+#         # apply rotary embedding
+#         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
+#         x_i = torch.cat([x_i, x[i, seq_len:]])
+
+#         # append to collection
+#         output.append(x_i)
+#     return torch.stack(output).to(x.dtype)
+
 @amp.autocast(enabled=False)
 @torch.compiler.disable()
-def rope_apply(x, grid_sizes, freqs):
+def rope_apply(x, grid_sizes, freqs, sp_size=1, sp_rank=0): # ✨ 加参数
     n, c = x.size(2), x.size(3) // 2
-
-    # split freqs
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
-    # loop over samples
     output = []
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
         seq_len = f * h * w
+        
+        # ✨ 按传入的参数计算截断索引
+        local_seq_len = seq_len // sp_size
+        start_idx = sp_rank * local_seq_len
+        end_idx = start_idx + local_seq_len
 
-        # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float32).reshape(
-            seq_len, n, -1, 2))
         freqs_i = torch.cat([
             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-                            dim=-1).reshape(seq_len, 1, -1)
+        ], dim=-1).reshape(seq_len, 1, -1)
 
-        # apply rotary embedding
+        # ✨ 切分 freqs
+        freqs_i = freqs_i[start_idx:end_idx]
+        x_i = torch.view_as_complex(x[i, :local_seq_len].to(torch.float32).reshape(local_seq_len, n, -1, 2))
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
-
-        # append to collection
+        x_i = torch.cat([x_i, x[i, local_seq_len:]])
         output.append(x_i)
     return torch.stack(output).to(x.dtype)
 
 
-def rope_apply_qk(q, k, grid_sizes, freqs):
-    q = rope_apply(q, grid_sizes, freqs)
-    k = rope_apply(k, grid_sizes, freqs)
+# def rope_apply_qk(q, k, grid_sizes, freqs):
+#     q = rope_apply(q, grid_sizes, freqs)
+#     k = rope_apply(k, grid_sizes, freqs)
+#     return q, k
+
+def rope_apply_qk(q, k, grid_sizes, freqs, sp_size=1, sp_rank=0): # ✨ 加参数
+    q = rope_apply(q, grid_sizes, freqs, sp_size, sp_rank)
+    k = rope_apply(k, grid_sizes, freqs, sp_size, sp_rank)
     return q, k
 
 
@@ -394,7 +767,93 @@ class WanCrossAttention(WanSelfAttention):
         x = x.flatten(2)
         x = self.o(x.to(dtype))
         return x
+    
 
+class ViTSpatialAdapter(WanSelfAttention):
+    """
+    专门用于强力控制框架的适配层。
+    包含原生 Ulysses Sequence Parallelism 逻辑，支持全局注意力！
+    """
+    def forward(self, x_normed, vit_feat, seq_lens, grid_sizes, freqs, dtype, sp_size=1, sp_rank=0):
+        b, s, n, d = *x_normed.shape[:2], self.num_heads, self.head_dim
+        
+        # 1. 生成 Q, K, V
+        q = self.norm_q(self.q(x_normed.to(dtype))).view(b, s, n, d)
+        k = self.norm_k(self.k(vit_feat.to(dtype))).view(b, s, n, d)
+        v = self.v(vit_feat.to(dtype)).view(b, s, n, d)
+
+        # 2. 应用 RoPE
+        q, k = rope_apply_qk(q, k, grid_sizes, freqs, sp_size, sp_rank)
+
+        # ==========================================
+        # ✨ 纯血 Ulysses 注意力逻辑
+        # ==========================================
+        
+        
+        if sp_size > 1:
+            sp_group_obj = get_sp_group()
+            group = sp_group_obj.group
+            
+            # [步骤 1] 聚集 Head，切分 Seq
+            q_all = NativeUlyssesAllToAll.apply(q, group, 2, 1)
+            k_all = NativeUlyssesAllToAll.apply(k, group, 2, 1)
+            v_all = NativeUlyssesAllToAll.apply(v, group, 2, 1)
+
+            # [步骤 2] 算全局注意力
+            x_out = attention(
+                q_all.to(dtype), 
+                k_all.to(dtype), 
+                v_all.to(dtype), 
+                k_lens=seq_lens, 
+                window_size=self.window_size
+            )
+
+            # [步骤 3] 恢复原有维度分布
+            x = NativeUlyssesAllToAll.apply(x_out, group, 1, 2)
+        else:
+            # 单卡模式，直接算
+            x = attention(
+                q.to(dtype), 
+                k.to(dtype), 
+                v.to(dtype), 
+                k_lens=seq_lens, 
+                window_size=self.window_size
+            )
+
+        # 3. 输出投影
+        x = x.to(dtype)
+        x = x.flatten(2)
+        x = self.o(x)
+        return x
+
+class ViTFeatureUpsampler(nn.Module):
+    def __init__(self, in_dim, out_dim, upsample_factor=2):
+        super().__init__()
+        self.out_dim = out_dim
+        self.factor = upsample_factor
+        # 在低分辨率下先做维度投影
+        self.pre_proj = nn.Linear(in_dim, out_dim)
+        # 卷积 + PixelShuffle 实现 1 个 Patch 分裂为 4 个
+        # mid_dim = out_dim * 4 (因为 factor=2, 2^2=4)
+        self.conv_upsample = nn.Sequential(
+            nn.Conv2d(out_dim, out_dim * (upsample_factor ** 2), kernel_size=3, padding=1),
+            nn.PixelShuffle(upsample_factor),
+            nn.GELU()
+        )
+
+    def forward(self, vit_feat, T, H, W):
+        B, L, C = vit_feat.shape
+        # 1. 维度投影
+        x = self.pre_proj(vit_feat) # [B, L, out_dim]
+        # 2. 还原空间结构，准备卷积
+        x = x.transpose(1, 2).view(B, self.out_dim, T, H, W)
+        # 3. 逐帧上采样 (将 T 维度并入 Batch)
+        x_frames = x.permute(0, 2, 1, 3, 4).contiguous().view(B * T, self.out_dim, H, W)
+        x_upsampled = self.conv_upsample(x_frames) # [B*T, out_dim, H*2, W*2]
+        # 4. 拉平回序列
+        _, _, H_new, W_new = x_upsampled.shape
+        x_final = x_upsampled.view(B, T, self.out_dim, H_new, W_new)
+        return x_final.permute(0, 2, 1, 3, 4).flatten(2).transpose(1, 2)
 
 WAN_CROSSATTENTION_CLASSES = {
     't2v_cross_attn': WanT2VCrossAttention,
@@ -541,7 +1000,7 @@ class MLPProj(torch.nn.Module):
         return clip_extra_context_tokens
 
 
-
+DEBUG = False
 class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
     r"""
     Wan diffusion backbone supporting both text-to-video and image-to-video.
@@ -635,6 +1094,31 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        
+        # 1. 维度对齐层 (将 ViT 的 2048 投影到 Wan2.2 的 3072)
+        # self.vit_proj = nn.Linear(2048, self.dim)
+        self.vit_upsampler = ViTFeatureUpsampler(in_dim=2048, out_dim=self.dim, upsample_factor=2) 
+
+        # self.start_idx = 0
+        # self.end_idx = self.num_layers - 1
+        self.start_idx = 6
+        self.end_idx = 24
+
+        # 2. 替换为 ViTSpatialAdapter (建议注入 6-24 层)
+        self.vit_adapter_layers = nn.ModuleList([
+            ViTSpatialAdapter(self.dim, self.num_heads, (-1, -1), self.qk_norm, self.eps) 
+            if self.start_idx <= i <= self.end_idx else nn.Identity() 
+            for i in range(self.num_layers)
+        ])
+
+        # 3. 独立的 Norm 层
+        self.vit_norms = nn.ModuleList([
+            WanRMSNorm(self.dim, eps=self.eps) if self.start_idx <= i <= self.end_idx else nn.Identity()
+            for i in range(self.num_layers)
+        ])
+
+        # 4. 门控系数 (初始化为 0)
+        self.vit_gating = nn.Parameter(torch.full((self.num_layers,), 0.001))
 
         # embeddings
         self.patch_embedding = nn.Conv3d(
@@ -642,13 +1126,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.text_embedding = nn.Sequential(
             nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
             nn.Linear(dim, dim))
-        
-        # vit
-        vit_dim = 2048
-        self.vit_projection = nn.Linear(vit_dim, dim, bias=False)
-        # self.fusion_attn = ViTCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
-        self.fusion_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps)
-        self.add_vit_features_layer_idx = [0]
 
         self.time_embedding = nn.Sequential(
             nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
@@ -701,7 +1178,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.current_steps = 0
         self.num_inference_steps = None
         self.gradient_checkpointing = False
-        self.all_gather = None
         self.sp_world_size = 1
         self.sp_world_rank = 0
         self.init_weights()
@@ -709,12 +1185,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
     def _set_gradient_checkpointing(self, *args, **kwargs):
         if "value" in kwargs:
             self.gradient_checkpointing = kwargs["value"]
-            if hasattr(self, "motioner") and hasattr(self.motioner, "gradient_checkpointing"):
-                self.motioner.gradient_checkpointing = kwargs["value"]
         elif "enable" in kwargs:
             self.gradient_checkpointing = kwargs["enable"]
-            if hasattr(self, "motioner") and hasattr(self.motioner, "gradient_checkpointing"):
-                self.motioner.gradient_checkpointing = kwargs["enable"]
         else:
             raise ValueError("Invalid set gradient checkpointing")
 
@@ -814,11 +1286,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         seq_len,
         clip_fea=None,
         y=None,
+        vit_features=None,
         y_camera=None,
         full_ref=None,
         subject_ref=None,
         cond_flag=True,
-        vit_fea=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -849,6 +1321,12 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # params
         device = self.patch_embedding.weight.device
         dtype = x.dtype
+        # print(f"forward x {x.shape}")
+        # if not hasattr(self, 'cnt'):
+        #     self.cnt = 0
+        # self.cnt += 1
+        # print(f"Transformer Forward 111")
+
         if self.freqs.device != device and torch.device(type="meta") != device:
             self.freqs = self.freqs.to(device)
 
@@ -888,6 +1366,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 last_elements = t[:, -1].unsqueeze(1)
                 padding = last_elements.repeat(1, pad_size)
                 t = torch.cat([t, padding], dim=1)
+
+        # print(f"Transformer Forward 222")
         
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         if self.sp_world_size > 1:
@@ -899,7 +1379,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         ])
 
         # time embeddings
-        with amp.autocast(dtype=torch.float32):
+        # with amp.autocast(dtype=torch.float32):
+        with torch.amp.autocast('cuda', dtype=torch.float32):
             if t.dim() != 1:
                 if t.size(1) < seq_len:
                     pad_size = seq_len - t.size(1)
@@ -918,35 +1399,141 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 e0 = self.time_projection(e).unflatten(1, (6, self.dim))
 
             # assert e.dtype == torch.float32 and e0.dtype == torch.float32
-            # e0 = e0.to(dtype)
-            # e = e.to(dtype)
-
+        e0 = e0.to(dtype)
+        e = e.to(dtype)
+        # print(f"Transformer Forward 333")
         # context
         context_lens = None
+        ########################################
         context = self.text_embedding(
             torch.stack([
                 torch.cat(
                     [u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
                 for u in context
-            ]))
+            ]).to(dtype))
+        
+        # c in crossattn
+        # if vit_features is not None and vit_features["seq_len"][0] > 0:
+        #     vit_seq_len = vit_features["seq_len"]
+        #     video_embeds = vit_features["video_embeds"]
+        #     video_grid_thw = vit_features["video_grid_thw"]
+        #     # if isinstance(vit_features, list):
+        #     #     vit_features = torch.stack(vit_features, dim=0)
+        #     vit_features = self.vit_projection(vit_features)
+        #     fusion_features = self.fusion_attn(vit_features, context, None, None, None) # 没有seq，全都有效
+        #     context = context + fusion_features
+        ########################################
+
+        # x in crossattn
+        # if vit_features is not None and vit_features["seq_len"][0] > 0:
+        #     vit_seq_len = vit_features["seq_len"]
+        #     video_embeds = vit_features["video_embeds"]
+        #     video_grid_thw = vit_features["video_grid_thw"]
+        #     # if isinstance(vit_features, list):
+        #     #     vit_features = torch.stack(vit_features, dim=0)
+        #     video_embeds = self.vit_projection(video_embeds)
+        #     fusion_features = self.fusion_attn(x, video_embeds, None, None, None) # 没有seq，全都有效
+        #     x = x + fusion_features
 
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
             context = torch.concat([context_clip, context], dim=1)
         
-        if vit_fea is not None:
-            if isinstance(vit_fea, list):
-                vit_fea = torch.stack(vit_fea, dim=0)
-            vit_fea = apply_dropout(vit_fea, training=self.training)
-            vit_fea = self.vit_projection(vit_fea)
-            vit_fea = self.fusion_attn(vit_fea, seq_lens, grid_sizes, self.freqs, dtype, t=t)
+        ########################################
+        # if vit_features is not None and vit_features["seq_len"][0] > 0:
+        #     # print(vit_features)
+        #     vit_seq_len = vit_features["seq_len"]
+        #     video_embeds = vit_features["video_embeds"]
+        #     video_grid_thw = vit_features["video_grid_thw"]
+        #     video_grid_thw_0 = video_grid_thw[0]
+
+        #     ############ interpolate vit features to match x ############
+        #     # for i in range(len(vit_seq_len)):
+        #     #     if vit_seq_len[i] != vit_seq_len[0]:
+        #     #         raise ValueError(f"vit_seq_len[{i}] {vit_seq_len[i]} != vit_seq_len[0] {vit_seq_len[0]}")
+        #     # video_embeds = video_embeds[:, :vit_seq_len[0], :]
+
+        #     # B, _, C = video_embeds.shape
+        #     # T_v, H_v, W_v = video_grid_thw
+        #     # video_embeds = video_embeds.view(B, T_v, H_v, W_v, C)
+
+        #     # video_embeds = video_embeds.permute(0, 4, 1, 2, 3)  # [B, C, T_v, H_v, W_v]
+
+        #     # for i in range(1, grid_sizes.size(0)):
+        #     #     if not torch.equal(grid_sizes[i], grid_sizes[0]):
+        #     #         raise ValueError(f"grid_sizes[{i}] {grid_sizes[i]} != grid_sizes[0] {grid_sizes[0]}")
+        #     # T_x, H_x, W_x = grid_sizes[0]
+        #     # video_embeds = F.interpolate(
+        #     #     video_embeds,
+        #     #     size=(T_x, H_x, W_x),
+        #     #     mode="trilinear",
+        #     #     align_corners=False
+        #     # )
+        #     # video_embeds = video_embeds.permute(0, 2, 3, 4, 1).contiguous()
+        #     # video_embeds = video_embeds.view(B, T_x * H_x * W_x, C)
+
+        #     # drop_token_prob = 0.05
+        #     drop_token_prob = 0.0
+        #     if drop_token_prob > 0.0:
+        #         batch, seq, _ = video_embeds.shape
+        #         keep_mask = torch.bernoulli(
+        #             torch.full((batch, seq, 1), 1 - drop_token_prob, device=video_embeds.device)
+        #         )
+        #         video_embeds = video_embeds * keep_mask
+
+        #     video_embeds = self.vit_norm1(video_embeds)
+        #     if DEBUG:
+        #         print(f"vit_features['video_embeds'] shape before attn: {video_embeds.shape}, vit_seq_len: {vit_seq_len}, video_grid_thw: {video_grid_thw}")
+        #     video_embeds = self.vit_attn(video_embeds, vit_seq_len, video_grid_thw, self.freqs, dtype, t=t)
+        #     video_embeds = self.vit_norm2(video_embeds)
+        #     video_embeds = self.vit_projection(video_embeds)
+
+        #     assert x.shape == video_embeds.shape, f"Batch size mismatch: {x.shape} vs {video_embeds.shape} {grid_sizes[0]} {video_grid_thw}"
+        #     # print(f"video_embeds.shape {video_embeds.shape} seq_lens {seq_lens} grid_sizes {grid_sizes}")
+
+        #     # DEBUG
+        #     x = x + video_embeds
+            
+        #     # import pdb; pdb.set_trace()
+        #     # vit_features = self.vit_projection(vit_features)
+        #     # fusion_features = self.fusion_attn(x, vit_features, seq_len, None, None)
+        #     # x = x + fusion_features
+        # ########################################
+        # ==========================================
+        # === 修复: 在 Context Parallel 切分前执行全局上采样 ===
+        # ==========================================
+        vit_feat = None
+        if vit_features is not None and "video_embeds" in vit_features:
+            # 拿到原始的全局结构
+            T_v, H_v, W_v = vit_features["video_grid_thw"][0]
+            # 对完整的 Tensor 进行上采样，确保空间结构不被破坏
+            # print(f"Before upsampling, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} T H W: {T_v} {H_v} {W_v}")
+            vit_feat = self.vit_upsampler(
+                vit_features["video_embeds"], T_v, H_v, W_v
+            )
+            # print(f"After upsampling, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} T H W: {T_v} {H_v} {W_v}")
 
         # Context Parallel
         if self.sp_world_size > 1:
             x = torch.chunk(x, self.sp_world_size, dim=1)[self.sp_world_rank]
+            # --- 新增补丁开始 ---
+            if vit_features is not None and "video_embeds" in vit_features:
+                # 必须对视觉特征进行同样的切分，确保与 x 的 patch 一一对应
+                vit_feat = torch.chunk(
+                    vit_feat, 
+                    self.sp_world_size, 
+                    dim=1
+                )[self.sp_world_rank]
+                # print(f"After context parallel split, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} x shape: {x.shape}")
+
+                # 如果你的 vit_features 中包含 seq_len，也需要更新为局部长度
+                if "seq_len" in vit_features:
+                    vit_features["seq_len"] = vit_features["seq_len"] // self.sp_world_size
+            # --- 新增补丁结束 ---
             if t.dim() != 1:
                 e0 = torch.chunk(e0, self.sp_world_size, dim=1)[self.sp_world_rank]
                 e = torch.chunk(e, self.sp_world_size, dim=1)[self.sp_world_rank]
+        # print(f"Transformer Forward x shape: {x.shape} e0 shape: {e0.shape} context shape: {context.shape} seq_lens: {seq_lens} grid_sizes: {grid_sizes}")
         
         # TeaCache
         if self.teacache is not None:
@@ -974,6 +1561,32 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 self.should_calc = self.teacache.should_calc
         
         # TeaCache
+        # === 1. 注入前预处理 (计算时间权重与维度对齐) ===
+        # print(t)
+        if t.dim() > 1:
+            # 如果 t 是 [B, seq_len]，先取 batch 的第一个，再取序列的第一个
+            current_t = t[0, 0].item()
+        elif t.dim() == 1:
+            # 如果 t 是 [B]
+            current_t = t[0].item()
+        else:
+            # 如果 t 是标量
+            current_t = t.item()
+        # t > 200 (早期) 强引导, t < 200 (后期) 线性消失, 保护 Wan2.2 原生精修能力
+        # print(f"current_t {current_t}")
+        t_threshold = 600
+        time_scale = (1.0 if current_t > t_threshold else (current_t / t_threshold)) + 1e-3
+        # time_scale = 1.0
+        # vit_feat = self.vit_proj(vit_features["video_embeds"]) if vit_features is not None else None
+        # vit_feat = vit_features["video_embeds"]
+        # print(f"current_t {current_t} time_scale {time_scale} vit_feat shape {vit_feat.shape if vit_feat is not None else None} x {x.shape}")
+        time_scale = time_scale * 1.0
+
+        # if vit_feat is not None:
+        #     T_v, H_v, W_v = vit_features["video_grid_thw"][0]
+        #     vit_feat = self.vit_upsampler(vit_features["video_embeds"], T_v, H_v, W_v)
+
+        # === 2. 进入模型核心 Block 循环 ===
         if self.teacache is not None:
             if not self.should_calc:
                 previous_residual = self.teacache.previous_residual_cond if cond_flag else self.teacache.previous_residual_uncond
@@ -981,87 +1594,73 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             else:
                 ori_x = x.clone().cpu() if self.teacache.offload else x.clone()
 
-                for idx, block in enumerate(self.blocks):
+                for i, block in enumerate(self.blocks):
                     if torch.is_grad_enabled() and self.gradient_checkpointing:
-
                         def create_custom_forward(module):
                             def custom_forward(*inputs):
                                 return module(*inputs)
-
                             return custom_forward
-                        ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                        ckpt_kwargs: Dict[str, Any] = {"use_reentrant": True} if is_torch_version(">=", "1.11.0") else {}
                         x = torch.utils.checkpoint.checkpoint(
                             create_custom_forward(block),
-                            x,
-                            e0,
-                            seq_lens,
-                            grid_sizes,
-                            self.freqs,
-                            context,
-                            context_lens,
-                            dtype,
-                            t,
-                            **ckpt_kwargs,
+                            x, e0, seq_lens, grid_sizes, self.freqs, context, context_lens, dtype, t, **ckpt_kwargs,
                         )
                     else:
-                        # arguments
-                        kwargs = dict(
-                            e=e0,
-                            seq_lens=seq_lens,
-                            grid_sizes=grid_sizes,
-                            freqs=self.freqs,
-                            context=context,
-                            context_lens=context_lens,
-                            dtype=dtype,
-                            t=t  
+                        x = block(x, e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=self.freqs, context=context, context_lens=context_lens, dtype=dtype, t=t)
+                    
+                    # 2. Side-Stream 注入 (6-24层)
+                    if self.start_idx <= i <= self.end_idx and vit_feat is not None:
+                        # 调用新定义的 ViTSpatialAdapter
+                        h_vit = self.vit_adapter_layers[i](
+                            x_normed = self.vit_norms[i](x), 
+                            vit_feat = vit_feat,
+                            seq_lens = seq_lens, 
+                            grid_sizes = grid_sizes, 
+                            freqs = self.freqs, 
+                            dtype = dtype,
+                            sp_size = self.sp_world_size,
+                            sp_rank = self.sp_world_rank
                         )
-                        x = block(x, **kwargs)
+                        # 叠加残差
+                        x = x + self.vit_gating[i] * time_scale * h_vit
                     
                 if cond_flag:
                     self.teacache.previous_residual_cond = x.cpu() - ori_x if self.teacache.offload else x - ori_x
                 else:
                     self.teacache.previous_residual_uncond = x.cpu() - ori_x if self.teacache.offload else x - ori_x
         else:
-            for idx, block in enumerate(self.blocks):
+            # 普通计算路径 (不开启 TeaCache 时)
+            for i, block in enumerate(self.blocks):
                 if torch.is_grad_enabled() and self.gradient_checkpointing:
-
                     def create_custom_forward(module):
                         def custom_forward(*inputs):
                             return module(*inputs)
-
                         return custom_forward
-                    ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                    ckpt_kwargs: Dict[str, Any] = {"use_reentrant": True} if is_torch_version(">=", "1.11.0") else {}
                     x = torch.utils.checkpoint.checkpoint(
                         create_custom_forward(block),
-                        x,
-                        e0,
-                        seq_lens,
-                        grid_sizes,
-                        self.freqs,
-                        context,
-                        context_lens,
-                        dtype,
-                        t,
-                        **ckpt_kwargs,
+                        x, e0, seq_lens, grid_sizes, self.freqs, context, context_lens, dtype, t, **ckpt_kwargs,
                     )
-                    if idx in self.add_vit_features_layer_idx:
-                        x = x + vit_fea
                 else:
-                    # arguments
-                    kwargs = dict(
-                        e=e0,
-                        seq_lens=seq_lens,
-                        grid_sizes=grid_sizes,
-                        freqs=self.freqs,
-                        context=context,
-                        context_lens=context_lens,
-                        dtype=dtype,
-                        t=t  
-                    )
-                    x = block(x, **kwargs)
-                    if idx in self.add_vit_features_layer_idx:
-                        x = x + vit_fea
+                    x = block(x, e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=self.freqs, context=context, context_lens=context_lens, dtype=dtype, t=t)
 
+                # 2. Side-Stream 注入 (6-24层)
+                # print(f"sp_world_size {self.sp_world_size} sp_world_rank {self.sp_world_rank} i {i}**********")
+                if self.start_idx <= i <= self.end_idx and vit_feat is not None:
+                    # 调用新定义的 ViTSpatialAdapter
+                    # print(f"i {i} x {x.shape}")
+                    h_vit = self.vit_adapter_layers[i](
+                        x_normed = self.vit_norms[i](x), 
+                        vit_feat = vit_feat,
+                        seq_lens = seq_lens, 
+                        grid_sizes = grid_sizes, 
+                        freqs = self.freqs, 
+                        dtype = dtype,
+                        sp_size = self.sp_world_size,
+                        sp_rank = self.sp_world_rank
+                    )
+                    # 叠加残差
+                    x = x + self.vit_gating[i] * time_scale * h_vit
         # head
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             def create_custom_forward(module):
@@ -1069,13 +1668,17 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                     return module(*inputs)
 
                 return custom_forward
-            ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+            ckpt_kwargs: Dict[str, Any] = {"use_reentrant": True} if is_torch_version(">=", "1.11.0") else {}
             x = torch.utils.checkpoint.checkpoint(create_custom_forward(self.head), x, e, **ckpt_kwargs)
         else:
             x = self.head(x, e)
 
         if self.sp_world_size > 1:
             x = self.all_gather(x, dim=1)
+
+        # 复制4份debug
+        # if self.sp_world_size > 1:
+        #     x = x.repeat_interleave(self.sp_world_size, dim=1)
 
         if self.ref_conv is not None and full_ref is not None:
             full_ref_length = full_ref.size(1)
@@ -1094,7 +1697,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             self.teacache.cnt += 1
             if self.teacache.cnt == self.teacache.num_steps:
                 self.teacache.reset()
-        
+        # print(f"sp_world_size {self.sp_world_size} sp_world_rank {self.sp_world_rank} BBBBBB")
         return x
 
 
@@ -1205,77 +1808,30 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         for key in _state_dict:
                             state_dict[key] = _state_dict[key]
 
-                if model.state_dict()['patch_embedding.weight'].size() != state_dict['patch_embedding.weight'].size():
-                    model.state_dict()['patch_embedding.weight'][:, :state_dict['patch_embedding.weight'].size()[1], :, :] = state_dict['patch_embedding.weight'][:, :model.state_dict()['patch_embedding.weight'].size()[1], :, :]
-                    model.state_dict()['patch_embedding.weight'][:, state_dict['patch_embedding.weight'].size()[1]:, :, :] = 0
-                    state_dict['patch_embedding.weight'] = model.state_dict()['patch_embedding.weight']
-
-                filtered_state_dict = {}
-                for key in state_dict:
-                    if key in model.state_dict() and model.state_dict()[key].size() == state_dict[key].size():
-                        filtered_state_dict[key] = state_dict[key]
-                    else:
-                        print(f"Skipping key '{key}' due to size mismatch or absence in model.")
-                        
-                model_keys = set(model.state_dict().keys())
-                loaded_keys = set(filtered_state_dict.keys())
-                missing_keys = model_keys - loaded_keys
-
-                def initialize_missing_parameters(missing_keys, model_state_dict, torch_dtype=None):
-                    initialized_dict = {}
-                    
-                    with torch.no_grad():
-                        for key in missing_keys:
-                            param_shape = model_state_dict[key].shape
-                            param_dtype = torch_dtype if torch_dtype is not None else model_state_dict[key].dtype
-                            if 'weight' in key:
-                                if any(norm_type in key for norm_type in ['norm', 'ln_', 'layer_norm', 'group_norm', 'batch_norm']):
-                                    initialized_dict[key] = torch.ones(param_shape, dtype=param_dtype)
-                                elif 'embedding' in key or 'embed' in key:
-                                    initialized_dict[key] = torch.randn(param_shape, dtype=param_dtype) * 0.02
-                                elif 'head' in key or 'output' in key or 'proj_out' in key:
-                                    initialized_dict[key] = torch.zeros(param_shape, dtype=param_dtype)
-                                elif len(param_shape) >= 2:
-                                    initialized_dict[key] = torch.empty(param_shape, dtype=param_dtype)
-                                    nn.init.xavier_uniform_(initialized_dict[key])
-                                else:
-                                    initialized_dict[key] = torch.randn(param_shape, dtype=param_dtype) * 0.02
-                            elif 'bias' in key:
-                                initialized_dict[key] = torch.zeros(param_shape, dtype=param_dtype)
-                            elif 'running_mean' in key:
-                                initialized_dict[key] = torch.zeros(param_shape, dtype=param_dtype)
-                            elif 'running_var' in key:
-                                initialized_dict[key] = torch.ones(param_shape, dtype=param_dtype)
-                            elif 'num_batches_tracked' in key:
-                                initialized_dict[key] = torch.zeros(param_shape, dtype=torch.long)
-                            else:
-                                initialized_dict[key] = torch.zeros(param_shape, dtype=param_dtype)
-                            
-                    return initialized_dict
-
-                if missing_keys:
-                    print(f"Missing keys will be initialized: {sorted(missing_keys)}")
-                    initialized_params = initialize_missing_parameters(
-                        missing_keys, 
-                        model.state_dict(), 
-                        torch_dtype
-                    )
-                    filtered_state_dict.update(initialized_params)
-
                 if diffusers_version >= "0.33.0":
                     # Diffusers has refactored `load_model_dict_into_meta` since version 0.33.0 in this commit:
                     # https://github.com/huggingface/diffusers/commit/f5929e03060d56063ff34b25a8308833bec7c785.
                     load_model_dict_into_meta(
                         model,
-                        filtered_state_dict,
+                        state_dict,
                         dtype=torch_dtype,
                         model_name_or_path=pretrained_model_path,
                     )
                 else:
-                    model._convert_deprecated_attention_blocks(filtered_state_dict)
+                    model._convert_deprecated_attention_blocks(state_dict)
+                    # move the params from meta device to cpu
+                    missing_keys = set(model.state_dict().keys()) - set(state_dict.keys())
+                    if len(missing_keys) > 0:
+                        raise ValueError(
+                            f"Cannot load {cls} from {pretrained_model_path} because the following keys are"
+                            f" missing: \n {', '.join(missing_keys)}. \n Please make sure to pass"
+                            " `low_cpu_mem_usage=False` and `device_map=None` if you want to randomly initialize"
+                            " those weights or else make sure your checkpoint file is correct."
+                        )
+
                     unexpected_keys = load_model_dict_into_meta(
                         model,
-                        filtered_state_dict,
+                        state_dict,
                         device=param_device,
                         dtype=torch_dtype,
                         model_name_or_path=pretrained_model_path,
@@ -1321,7 +1877,9 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             if key in model.state_dict().keys() and model.state_dict()[key].size() == state_dict[key].size():
                 tmp_state_dict[key] = state_dict[key]
             else:
-                print(key, "Size don't match, skip")
+                if not ("visual" in key or "encoder" in key):
+                    print(key, "Size don't match, skip")
+                # pass
                 
         state_dict = tmp_state_dict
 
