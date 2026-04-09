@@ -1883,7 +1883,7 @@ def main():
                     vit_features = {}
                     embeds = batch['vit_values'][0]
                     grid = batch['grid_thw'][0]
-                    vit_features['video_embeds'] = qwen3_vit(embeds, grid_thw=grid)[0]
+                    vit_features['video_embeds'] = qwen3_vit(embeds, grid_thw=grid)
                     grid[0][1] = grid[0][1] // 2
                     grid[0][2] = grid[0][2] // 2
                     vit_features['video_grid_thw'] = grid
