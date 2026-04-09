@@ -272,6 +272,8 @@ class ImageVideoDataset(Dataset):
         else:
             pixel_values_for_dit = self.video_transforms(pixel_values_for_dit)
 
+        del pixel_values, processed_frames, processed_frames_dit
+      
         return pixel_values_for_dit, vit_values, gird_thw
         
 
