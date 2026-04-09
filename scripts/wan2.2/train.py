@@ -53,6 +53,7 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 from transformers.utils import ContextManagers
+from accelerate import InitProcessGroupKwargs
 
 import datasets
 
@@ -329,6 +330,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument(
         "--input_perturbation", type=float, default=0, help="The scale of input perturbation. Recommended 0.1."
+    )
+    parser.add_argument(
+        "--sp_size", type=int, default=1, help="Sequence parallelism size (Context Parallel)."
     )
     parser.add_argument(
         "--pretrained_model_name_or_path",
@@ -849,14 +853,159 @@ def main():
 
     config = OmegaConf.load(args.config_path)
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
+    process_group_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=1800))
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
         project_config=accelerator_project_config,
+        kwargs_handlers=[process_group_kwargs],
     )
 
+    # ==========================================
+    # ✨ 终极绝杀版：纯 NCCL 接管 xFuser 的 SP 分组
+    # 彻底杜绝 Gloo 跨机通信报错
+    # ==========================================
+    sp_size = args.sp_size
+    world_size = accelerator.num_processes
+    global_rank = accelerator.process_index
+    
+    # 计算 DP 维度的参数
+    dp_world_size = world_size // sp_size
+    dp_rank = global_rank // sp_size
+    sp_rank = global_rank % sp_size
+    
+    if sp_size > 1:
+        
+        # 1. 确保基础 NCCL 环境就绪 (由 Accelerate 兜底)
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+            
+        # 2. 创建 Sequence Parallel (SP) 组
+        sp_groups = []
+        for i in range(dp_world_size):
+            ranks = list(range(i * sp_size, (i + 1) * sp_size))
+            group = dist.new_group(ranks)
+            sp_groups.append(group)
+            
+        my_sp_group = sp_groups[dp_rank]
+        
+        # ==========================================
+        # ✨ 终极防死锁补丁：强制预热通信子组 (Eager Initialization)
+        # ==========================================
+        try:
+            # 用一个极小的无用张量，强迫底层 NCCL 立即握手建环！
+            dummy_tensor = torch.zeros(1, device=accelerator.device)
+            dist.all_reduce(dummy_tensor, group=my_sp_group)
+            
+            # 全局同步，确保所有组都建环完毕再往下走
+            dist.barrier()
+            if accelerator.is_main_process:
+                print("✅ 成功预热所有 SP 通信组，彻底消除 Lazy Init 死锁隐患！")
+        except Exception as e:
+            if accelerator.is_main_process:
+                print(f"❌ 预热通信组失败: {e}")
+        
+        # 3. 构造完美的 xFuser SP 伪装对象 (带有反向传播护甲！)
+        
+        # ✨ 手搓一个可导的 All-Gather 算子
+        class _DiffAllGather(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, tensor, group, sp_size, dim, rank_in_group):
+                # 记录反向传播需要的信息
+                ctx.group = group
+                ctx.sp_size = sp_size
+                ctx.dim = dim
+                ctx.rank_in_group = rank_in_group
+                
+                # 保证物理连续性，执行前向拼接
+                tensor = tensor.contiguous()
+                gathered = [torch.empty_like(tensor) for _ in range(sp_size)]
+                dist.all_gather(gathered, tensor, group=group)
+                return torch.cat(gathered, dim=dim)
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                # ✨ 反向传播魔法：Loss 传回了一个完整的巨大梯度
+                grad_output = grad_output.contiguous()
+                # 我们把它切成 sp_size 块
+                chunks = torch.chunk(grad_output, ctx.sp_size, dim=ctx.dim)
+                # 当前卡只认领属于自己的那一块梯度，传回上一层！
+                return chunks[ctx.rank_in_group], None, None, None, None
+
+        # 伪装组主体
+        class NativeSPGroup:
+            def __init__(self, group, sp_size, sp_rank):
+                self.group = group
+                self.sp_size = sp_size
+                self.world_size = sp_size 
+                self.rank = sp_rank
+                self.local_rank = sp_rank
+                self.rank_in_group = sp_rank 
+            
+            def all_gather(self, tensor, dim=1):
+                # ✨ 调用带有反向传播的算子，替代原来的纯物理操作
+                return _DiffAllGather.apply(tensor, self.group, self.sp_size, dim, self.rank_in_group)
+                
+            def size(self):
+                return self.sp_size
+
+        # ==========================================
+        # 4. 暴力精准覆盖：直接修改模型文件里的本地引用！
+        # ==========================================
+        dummy_sp_group = NativeSPGroup(my_sp_group, sp_size, sp_rank)
+
+        # 🎯 目标 1：覆盖 Transformer 模型里的引用
+        import videox_fun.models.wan_transformer3d as wan3d
+        wan3d.get_sp_group = lambda: dummy_sp_group
+        wan3d.get_sequence_parallel_world_size = lambda: sp_size
+        wan3d.get_sequence_parallel_rank = lambda: sp_rank
+        
+        # 🎯 目标 2：覆盖注意力算子里的引用
+        import videox_fun.dist.wan_xfuser as wan_xfuser
+        wan_xfuser.get_sp_group = lambda: dummy_sp_group
+        wan_xfuser.get_sequence_parallel_world_size = lambda: sp_size
+        wan_xfuser.get_sequence_parallel_rank = lambda: sp_rank
+        
+        # 兜底覆盖底层模块
+        import videox_fun.dist.fuser as fuser
+        fuser.get_sp_group = lambda: dummy_sp_group
+        fuser.get_sequence_parallel_world_size = lambda: sp_size
+        fuser.get_sequence_parallel_rank = lambda: sp_rank
+        fuser.model_parallel_is_initialized = lambda: True
+
+        # ==========================================
+        # ✨ 终极补丁：按照 yunchang 最新源码的签名进行初始化
+        # ==========================================
+        try:
+            import yunchang
+            # 严格对齐签名: (sp_ulysses_degree, sp_ring_degree, rank, world_size)
+            yunchang.set_seq_parallel_pg(
+                sp_ulysses_degree=sp_size, 
+                sp_ring_degree=1, 
+                rank=dist.get_rank(), 
+                world_size=dist.get_world_size()
+            )
+            
+            if accelerator.is_main_process:
+                print("✅ Successfully initialized yunchang SP ProcessGroup.")
+        except ImportError:
+            if accelerator.is_main_process:
+                print("⚠️  yunchang module not found, skipping PG injection.")
+            
+    # ⚠️ 依然使用 dp_rank 初始化种子，保证 SP 组内 VAE 噪声和 Dropout 掩码完全一致
+    if args.seed is not None:
+        set_seed(args.seed)
+        rng = np.random.default_rng(np.random.PCG64(args.seed + dp_rank))
+        torch_rng = torch.Generator(accelerator.device).manual_seed(args.seed + dp_rank)
+    else:
+        rng = None
+        torch_rng = None
+    index_rng = np.random.default_rng(np.random.PCG64(43))
+    print(f"Init rng with seed {args.seed + dp_rank}. SP_Rank: {sp_rank}, DP_Rank: {dp_rank}")
+    # ==========================================
+  
     deepspeed_plugin = accelerator.state.deepspeed_plugin if hasattr(accelerator.state, "deepspeed_plugin") else None
     fsdp_plugin = accelerator.state.fsdp_plugin if hasattr(accelerator.state, "fsdp_plugin") else None
     if deepspeed_plugin is not None:
@@ -1487,6 +1636,9 @@ def main():
         transformer3d, optimizer, train_dataloader, lr_scheduler
     )
 
+    if sp_size > 1:
+        accelerator.unwrap_model(transformer3d).enable_multi_gpus_inference()
+
     if fsdp_stage != 0:
         from functools import partial
         from videox_fun.dist import set_multi_gpus_devices, shard_model
@@ -1918,6 +2070,8 @@ def main():
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
                 loss = custom_mse_loss(noise_pred.float(), target.float(), weighting.float())
                 loss = loss.mean()
+                if sp_size > 1:
+                    loss = loss * sp_size
 
                 if args.motion_sub_loss and noise_pred.size()[2] > 2:
                     gt_sub_noise = noise_pred[:, :, 1:].float() - noise_pred[:, :, :-1].float()
