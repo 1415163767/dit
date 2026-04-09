@@ -55,6 +55,7 @@ accelerate launch \
   --boundary_type="full" \
   --train_mode="normal" \
   --trainable_modules "." \
+  --low_vram \
   --report_to wandb
 
 python /blob/thinking.py
