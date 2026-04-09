@@ -1884,7 +1884,9 @@ def main():
                     embeds = batch['vit_values'][0]
                     grid = batch['grid_thw'][0]
                     vit_features['video_embeds'] = qwen3_vit(embeds, grid_thw=grid)[0]
-                    vit_features['video_grid_thw'] = grid[0]
+                    grid[0][1] = grid[0][1] // 2
+                    grid[0][2] = grid[0][2] // 2
+                    vit_features['video_grid_thw'] = grid
                     print(vit_features['video_embeds'].shape, vit_features['video_grid_thw'], vit_features['video_grid_thw'].shape)
 
                 if args.low_vram:
