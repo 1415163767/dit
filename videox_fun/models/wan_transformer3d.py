@@ -1399,7 +1399,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                     self.sp_world_size, 
                     dim=1
                 )[self.sp_world_rank]
-                # print(f"After context parallel split, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} x shape: {x.shape}")
+                print(f"After context parallel split, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} x shape: {x.shape}")
 
                 # 如果你的 vit_features 中包含 seq_len，也需要更新为局部长度
                 if "seq_len" in vit_features:
@@ -1451,11 +1451,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # print(f"current_t {current_t}")
         t_threshold = 600
         time_scale = (1.0 if current_t > t_threshold else (current_t / t_threshold)) + 1e-3
-        # time_scale = 1.0
-        # vit_feat = self.vit_proj(vit_features["video_embeds"]) if vit_features is not None else None
-        # vit_feat = vit_features["video_embeds"]
-        # print(f"current_t {current_t} time_scale {time_scale} vit_feat shape {vit_feat.shape if vit_feat is not None else None} x {x.shape}")
-        time_scale = time_scale * 1.0
 
         # === 2. 进入模型核心 Block 循环 ===
         if self.teacache is not None:
