@@ -1,17 +1,18 @@
-# export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.2-TI2V-5B"
-export MODEL_NAME="/home/v-yanboding/dit_training/ckpt/Wan2.2"
-export VQ_PATH="/blob/dyb_output/icml2026/single_codebook_ema/checkpoint-55399/model.safetensors"
+export MODEL_NAME="/blob/dyb/pretrained_ckpts/Wan2.2-TI2V-5B"
+# export MODEL_NAME="/home/v-yanboding/dit_training/ckpt/Wan2.2"
+export VQ_PATH="/blob/dyb_output/icml2026/multiple_codebook_ema_scale_image_video/checkpoint-963425/model.safetensors"
 export DATA_PATH="/blob/dyb/processed_data"
-export OUTPUT="./output_test"
+export OUTPUT="/blob/dyb_output/icml2026/dit_adapter"
 NCCL_DEBUG=INFO
 
-export WANDB_PROJECT="test"
+export WANDB_PROJECT="icml_2026_dit_ablation"
 
 accelerate launch \
   --use_deepspeed \
   --zero_stage 3 \
-  --deepspeed_config_file config/zero_stage3_config.json \
-  --deepspeed_multinode_launcher standard \
+  --main_process_port 29500 \
+  --num_processes 8 \
+  --deepspeed_config_file config/zero_stage3_config_cpu_offload.json \
   scripts/wan2.2/train.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
@@ -20,14 +21,15 @@ accelerate launch \
   --video_sample_stride=1 \
   --vit_sample_stride=2 \
   --video_sample_n_frames=121 \
-  --resolution_list "(384,384)" "(288,512)" "(512,288)" \
+  --resolution_list "(1280,704)" "(704,1280)" \
   --train_batch_size=1 \
+  --resume_from_checkpoint "latest" \
   --gradient_accumulation_steps=1 \
   --dataloader_num_workers=8 \
   --num_train_epochs=1 \
   --checkpointing_steps=5000 \
   --learning_rate=2e-05 \
-  --lr_scheduler="cosine" \
+  --lr_scheduler="constant_with_warmup" \
   --lr_warmup_ratio=0.03 \
   --seed=42 \
   --output_dir=$OUTPUT \
@@ -42,3 +44,5 @@ accelerate launch \
   --train_mode="normal" \
   --trainable_modules "." \
   --report_to wandb
+
+python /blob/thinking.py
