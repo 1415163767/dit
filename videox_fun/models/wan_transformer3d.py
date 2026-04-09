@@ -496,37 +496,6 @@ def get_resize_crop_region_for_grid(src, tgt_width, tgt_height):
     return (crop_top, crop_left), (crop_top + resize_height, crop_left + resize_width)
 
 
-# @amp.autocast(enabled=False)
-# @torch.compiler.disable()
-# def rope_apply(x, grid_sizes, freqs):
-#     n, c = x.size(2), x.size(3) // 2
-
-#     # split freqs
-#     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
-
-#     # loop over samples
-#     output = []
-#     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-#         seq_len = f * h * w
-
-#         # precompute multipliers
-#         x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float32).reshape(
-#             seq_len, n, -1, 2))
-#         freqs_i = torch.cat([
-#             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-#             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-#             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-#         ],
-#                             dim=-1).reshape(seq_len, 1, -1)
-
-#         # apply rotary embedding
-#         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-#         x_i = torch.cat([x_i, x[i, seq_len:]])
-
-#         # append to collection
-#         output.append(x_i)
-#     return torch.stack(output).to(x.dtype)
-
 @amp.autocast(enabled=False)
 @torch.compiler.disable()
 def rope_apply(x, grid_sizes, freqs, sp_size=1, sp_rank=0): # ✨ 加参数
@@ -557,10 +526,6 @@ def rope_apply(x, grid_sizes, freqs, sp_size=1, sp_rank=0): # ✨ 加参数
     return torch.stack(output).to(x.dtype)
 
 
-# def rope_apply_qk(q, k, grid_sizes, freqs):
-#     q = rope_apply(q, grid_sizes, freqs)
-#     k = rope_apply(k, grid_sizes, freqs)
-#     return q, k
 
 def rope_apply_qk(q, k, grid_sizes, freqs, sp_size=1, sp_rank=0): # ✨ 加参数
     q = rope_apply(q, grid_sizes, freqs, sp_size, sp_rank)
@@ -1321,11 +1286,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # params
         device = self.patch_embedding.weight.device
         dtype = x.dtype
-        # print(f"forward x {x.shape}")
-        # if not hasattr(self, 'cnt'):
-        #     self.cnt = 0
-        # self.cnt += 1
-        # print(f"Transformer Forward 111")
 
         if self.freqs.device != device and torch.device(type="meta") != device:
             self.freqs = self.freqs.to(device)
@@ -1366,8 +1326,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 last_elements = t[:, -1].unsqueeze(1)
                 padding = last_elements.repeat(1, pad_size)
                 t = torch.cat([t, padding], dim=1)
-
-        # print(f"Transformer Forward 222")
         
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         if self.sp_world_size > 1:
@@ -1401,7 +1359,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             # assert e.dtype == torch.float32 and e0.dtype == torch.float32
         e0 = e0.to(dtype)
         e = e.to(dtype)
-        # print(f"Transformer Forward 333")
+
         # context
         context_lens = None
         ########################################
@@ -1411,94 +1369,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                     [u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
                 for u in context
             ]).to(dtype))
-        
-        # c in crossattn
-        # if vit_features is not None and vit_features["seq_len"][0] > 0:
-        #     vit_seq_len = vit_features["seq_len"]
-        #     video_embeds = vit_features["video_embeds"]
-        #     video_grid_thw = vit_features["video_grid_thw"]
-        #     # if isinstance(vit_features, list):
-        #     #     vit_features = torch.stack(vit_features, dim=0)
-        #     vit_features = self.vit_projection(vit_features)
-        #     fusion_features = self.fusion_attn(vit_features, context, None, None, None) # 没有seq，全都有效
-        #     context = context + fusion_features
-        ########################################
-
-        # x in crossattn
-        # if vit_features is not None and vit_features["seq_len"][0] > 0:
-        #     vit_seq_len = vit_features["seq_len"]
-        #     video_embeds = vit_features["video_embeds"]
-        #     video_grid_thw = vit_features["video_grid_thw"]
-        #     # if isinstance(vit_features, list):
-        #     #     vit_features = torch.stack(vit_features, dim=0)
-        #     video_embeds = self.vit_projection(video_embeds)
-        #     fusion_features = self.fusion_attn(x, video_embeds, None, None, None) # 没有seq，全都有效
-        #     x = x + fusion_features
 
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
             context = torch.concat([context_clip, context], dim=1)
         
-        ########################################
-        # if vit_features is not None and vit_features["seq_len"][0] > 0:
-        #     # print(vit_features)
-        #     vit_seq_len = vit_features["seq_len"]
-        #     video_embeds = vit_features["video_embeds"]
-        #     video_grid_thw = vit_features["video_grid_thw"]
-        #     video_grid_thw_0 = video_grid_thw[0]
-
-        #     ############ interpolate vit features to match x ############
-        #     # for i in range(len(vit_seq_len)):
-        #     #     if vit_seq_len[i] != vit_seq_len[0]:
-        #     #         raise ValueError(f"vit_seq_len[{i}] {vit_seq_len[i]} != vit_seq_len[0] {vit_seq_len[0]}")
-        #     # video_embeds = video_embeds[:, :vit_seq_len[0], :]
-
-        #     # B, _, C = video_embeds.shape
-        #     # T_v, H_v, W_v = video_grid_thw
-        #     # video_embeds = video_embeds.view(B, T_v, H_v, W_v, C)
-
-        #     # video_embeds = video_embeds.permute(0, 4, 1, 2, 3)  # [B, C, T_v, H_v, W_v]
-
-        #     # for i in range(1, grid_sizes.size(0)):
-        #     #     if not torch.equal(grid_sizes[i], grid_sizes[0]):
-        #     #         raise ValueError(f"grid_sizes[{i}] {grid_sizes[i]} != grid_sizes[0] {grid_sizes[0]}")
-        #     # T_x, H_x, W_x = grid_sizes[0]
-        #     # video_embeds = F.interpolate(
-        #     #     video_embeds,
-        #     #     size=(T_x, H_x, W_x),
-        #     #     mode="trilinear",
-        #     #     align_corners=False
-        #     # )
-        #     # video_embeds = video_embeds.permute(0, 2, 3, 4, 1).contiguous()
-        #     # video_embeds = video_embeds.view(B, T_x * H_x * W_x, C)
-
-        #     # drop_token_prob = 0.05
-        #     drop_token_prob = 0.0
-        #     if drop_token_prob > 0.0:
-        #         batch, seq, _ = video_embeds.shape
-        #         keep_mask = torch.bernoulli(
-        #             torch.full((batch, seq, 1), 1 - drop_token_prob, device=video_embeds.device)
-        #         )
-        #         video_embeds = video_embeds * keep_mask
-
-        #     video_embeds = self.vit_norm1(video_embeds)
-        #     if DEBUG:
-        #         print(f"vit_features['video_embeds'] shape before attn: {video_embeds.shape}, vit_seq_len: {vit_seq_len}, video_grid_thw: {video_grid_thw}")
-        #     video_embeds = self.vit_attn(video_embeds, vit_seq_len, video_grid_thw, self.freqs, dtype, t=t)
-        #     video_embeds = self.vit_norm2(video_embeds)
-        #     video_embeds = self.vit_projection(video_embeds)
-
-        #     assert x.shape == video_embeds.shape, f"Batch size mismatch: {x.shape} vs {video_embeds.shape} {grid_sizes[0]} {video_grid_thw}"
-        #     # print(f"video_embeds.shape {video_embeds.shape} seq_lens {seq_lens} grid_sizes {grid_sizes}")
-
-        #     # DEBUG
-        #     x = x + video_embeds
-            
-        #     # import pdb; pdb.set_trace()
-        #     # vit_features = self.vit_projection(vit_features)
-        #     # fusion_features = self.fusion_attn(x, vit_features, seq_len, None, None)
-        #     # x = x + fusion_features
-        # ########################################
         # ==========================================
         # === 修复: 在 Context Parallel 切分前执行全局上采样 ===
         # ==========================================
@@ -1581,10 +1456,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # vit_feat = vit_features["video_embeds"]
         # print(f"current_t {current_t} time_scale {time_scale} vit_feat shape {vit_feat.shape if vit_feat is not None else None} x {x.shape}")
         time_scale = time_scale * 1.0
-
-        # if vit_feat is not None:
-        #     T_v, H_v, W_v = vit_features["video_grid_thw"][0]
-        #     vit_feat = self.vit_upsampler(vit_features["video_embeds"], T_v, H_v, W_v)
 
         # === 2. 进入模型核心 Block 循环 ===
         if self.teacache is not None:
@@ -1675,10 +1546,6 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         if self.sp_world_size > 1:
             x = self.all_gather(x, dim=1)
-
-        # 复制4份debug
-        # if self.sp_world_size > 1:
-        #     x = x.repeat_interleave(self.sp_world_size, dim=1)
 
         if self.ref_conv is not None and full_ref is not None:
             full_ref_length = full_ref.size(1)
