@@ -540,13 +540,13 @@ def apply_dropout(tokens,
     if torch.rand(1).item() < cfg_drop_prob:
         return torch.zeros_like(tokens)
 
-    # (2) Token-level dropout
-    if torch.rand(1).item() < enable_token_drop_prob:
-        keep_prob = 1 - token_drop_prob
-        random_tensor = tokens.new_empty(tokens.shape[0], tokens.shape[1], 1).bernoulli_(keep_prob)
-        if scale_by_keep:
-            random_tensor.div_(keep_prob)
-        tokens = tokens * random_tensor
+    # # (2) Token-level dropout
+    # if torch.rand(1).item() < enable_token_drop_prob:
+    #     keep_prob = 1 - token_drop_prob
+    #     random_tensor = tokens.new_empty(tokens.shape[0], tokens.shape[1], 1).bernoulli_(keep_prob)
+    #     if scale_by_keep:
+    #         random_tensor.div_(keep_prob)
+    #     tokens = tokens * random_tensor
       
     return tokens
 
@@ -823,17 +823,24 @@ class ViTFeatureUpsampler(nn.Module):
         self.pre_proj = nn.Linear(in_dim, out_dim)
 
     def forward(self, vit_feat, T, H, W, target_H, target_W):
+        # B, L, C = vit_feat.shape
+        # # 1. 维度投影
+        # x = self.pre_proj(vit_feat) # [B, L, out_dim]
+        # # 2. 还原空间结构，准备卷积
+        # x = x.transpose(1, 2).view(B, self.out_dim, T, H, W)
+        # # 3. 逐帧上采样 (将 T 维度并入 Batch) 
+        # x_frames = x.permute(0, 2, 1, 3, 4).contiguous().view(B * T, self.out_dim, H, W)
+        # x_upsampled = F.interpolate(x_frames, size=(target_H, target_W), mode='bilinear', align_corners=False)
+        # # 4. 拉平回序列
+        # x_final = x_upsampled.view(B, T, self.out_dim, target_H, target_W)
+        # return x_final.permute(0, 2, 1, 3, 4).flatten(2).transpose(1, 2)
         B, L, C = vit_feat.shape
-        # 1. 维度投影
-        x = self.pre_proj(vit_feat) # [B, L, out_dim]
-        # 2. 还原空间结构，准备卷积
         x = x.transpose(1, 2).view(B, self.out_dim, T, H, W)
-        # 3. 逐帧上采样 (将 T 维度并入 Batch) 
         x_frames = x.permute(0, 2, 1, 3, 4).contiguous().view(B * T, self.out_dim, H, W)
         x_upsampled = F.interpolate(x_frames, size=(target_H, target_W), mode='bilinear', align_corners=False)
-        # 4. 拉平回序列
-        x_final = x_upsampled.view(B, T, self.out_dim, target_H, target_W)
-        return x_final.permute(0, 2, 1, 3, 4).flatten(2).transpose(1, 2)
+        x_final = x_upsampled.view(B, T, self.out_dim, target_H, target_W).permute(0, 2, 1, 3, 4).flatten(2).transpose(1, 2)
+        x = self.pre_proj(vit_feat) # [B, L, out_dim]
+        return x
 
 WAN_CROSSATTENTION_CLASSES = {
     't2v_cross_attn': WanT2VCrossAttention,
