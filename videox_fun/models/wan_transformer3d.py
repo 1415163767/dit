@@ -1405,9 +1405,9 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             T_v, H_v, W_v = vit_features["video_grid_thw"][0]
             # 对完整的 Tensor 进行上采样，确保空间结构不被破坏
             # print(f"Before upsampling, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} T H W: {T_v} {H_v} {W_v}")
-            vit_feat = apply_dropout(vit_feat)
+            vit_feat = apply_dropout(vit_features["video_embeds"])
             vit_feat = self.vit_upsampler(
-                vit_features["video_embeds"], T_v, H_v, W_v, grid_sizes[0][1].item(), grid_sizes[0][2].item()
+                vit_feat, T_v, H_v, W_v, grid_sizes[0][1].item(), grid_sizes[0][2].item()
             )
             # print(f"After upsampling, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} T H W: {T_v} {H_v} {W_v}")
 
