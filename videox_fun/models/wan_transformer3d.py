@@ -835,11 +835,11 @@ class ViTFeatureUpsampler(nn.Module):
         # x_final = x_upsampled.view(B, T, self.out_dim, target_H, target_W)
         # return x_final.permute(0, 2, 1, 3, 4).flatten(2).transpose(1, 2)
         B, L, C = vit_feat.shape
-        x = x.transpose(1, 2).view(B, self.out_dim, T, H, W)
-        x_frames = x.permute(0, 2, 1, 3, 4).contiguous().view(B * T, self.out_dim, H, W)
+        x = vit_feat.transpose(1, 2).view(B, C, T, H, W)
+        x_frames = x.permute(0, 2, 1, 3, 4).contiguous().view(B * T, C, H, W)
         x_upsampled = F.interpolate(x_frames, size=(target_H, target_W), mode='bilinear', align_corners=False)
-        x_final = x_upsampled.view(B, T, self.out_dim, target_H, target_W).permute(0, 2, 1, 3, 4).flatten(2).transpose(1, 2)
-        x = self.pre_proj(vit_feat) # [B, L, out_dim]
+        x_final = x_upsampled.view(B, T, C, target_H, target_W).permute(0, 2, 1, 3, 4).flatten(2).transpose(1, 2)
+        x = self.pre_proj(x_final) # [B, L, out_dim]
         return x
 
 WAN_CROSSATTENTION_CLASSES = {
