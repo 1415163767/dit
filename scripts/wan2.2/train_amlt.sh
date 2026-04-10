@@ -38,7 +38,7 @@ accelerate launch \
   --train_batch_size=1 \
   --resume_from_checkpoint "latest" \
   --gradient_accumulation_steps=1 \
-  --dataloader_num_workers=8 \
+  --dataloader_num_workers=4 \
   --num_train_epochs=1 \
   --checkpointing_steps=5000 \
   --learning_rate=2e-05 \
@@ -56,6 +56,7 @@ accelerate launch \
   --boundary_type="full" \
   --train_mode="normal" \
   --trainable_modules "." \
+  --low_vram \
   --report_to wandb
 
 python /blob/thinking.py
