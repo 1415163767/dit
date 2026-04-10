@@ -1182,7 +1182,7 @@ def main():
     # For 3D Patch: trainable_modules = ['ff.net', 'pos_embed', 'attn2', 'proj_out', 'timepositionalencoding', 'h_position', 'w_position']
     # For 2D Patch: trainable_modules = ['ff.net', 'attn2', 'timepositionalencoding', 'h_position', 'w_position']
     trainable_vit_modules = [
-        'vit_proj', 
+        'vit_upsampler', 
         'vit_adapter_layers', 
         'vit_norms', 
         'vit_gating'
@@ -1343,7 +1343,7 @@ def main():
     
     # 定义你要训练的“视觉补丁”组件
     trainable_vit_modules = [
-        'vit_proj',             # 维度投影层
+        'vit_upsampler',        # 维度投影层
         'vit_adapter_layers',   # 中间 Cross-Attention 层
         'vit_norms',            # 适配层专用的 Norm
         'vit_gating'            # 每一层的可学习开关
