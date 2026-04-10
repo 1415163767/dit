@@ -1415,7 +1415,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                     self.sp_world_size, 
                     dim=1
                 )[self.sp_world_rank]
-                print(f"After context parallel split, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} x shape: {x.shape}")
+                # print(f"After context parallel split, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} x shape: {x.shape}")
 
                 # 如果你的 vit_features 中包含 seq_len，也需要更新为局部长度
                 if "seq_len" in vit_features:
