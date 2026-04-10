@@ -526,6 +526,30 @@ def rope_apply(x, grid_sizes, freqs, sp_size=1, sp_rank=0): # ✨ 加参数
     return torch.stack(output).to(x.dtype)
 
 
+def apply_dropout(tokens,
+                  cfg_drop_prob=0.1,
+                  enable_token_drop_prob=0.3,
+                  token_drop_prob=0.2,
+                  training=True,
+                  scale_by_keep=True):
+
+    if not training:
+        return tokens
+
+    # (1) CFG dropout: whole condition removed
+    if torch.rand(1).item() < cfg_drop_prob:
+        return torch.zeros_like(tokens)
+
+    # (2) Token-level dropout
+    if torch.rand(1).item() < enable_token_drop_prob:
+        keep_prob = 1 - token_drop_prob
+        random_tensor = tokens.new_empty(tokens.shape[0], tokens.shape[1], 1).bernoulli_(keep_prob)
+        if scale_by_keep:
+            random_tensor.div_(keep_prob)
+        tokens = tokens * random_tensor
+      
+    return tokens
+
 
 def rope_apply_qk(q, k, grid_sizes, freqs, sp_size=1, sp_rank=0): # ✨ 加参数
     q = rope_apply(q, grid_sizes, freqs, sp_size, sp_rank)
@@ -1377,6 +1401,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             vit_feat = self.vit_upsampler(
                 vit_features["video_embeds"], T_v, H_v, W_v, grid_sizes[0][1].item(), grid_sizes[0][2].item()
             )
+            vit_feat = apply_dropout(vit_feat)
             # print(f"After upsampling, vit_features['video_embeds'] shape: {vit_features['video_embeds'].shape} T H W: {T_v} {H_v} {W_v}")
 
         # Context Parallel
