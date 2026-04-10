@@ -1699,8 +1699,8 @@ def main():
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    logger.info(f"  Warmup steps = {num_warmup_steps}")
-    logger.info(f"  Warmup ratio = {num_warmup_steps / args.max_train_steps:.4f}")
+    # logger.info(f"  Warmup steps = {num_warmup_steps}")
+    # logger.info(f"  Warmup ratio = {num_warmup_steps / args.max_train_steps:.4f}")
     logger.info(f"  LR scheduler = {args.lr_scheduler}")
     global_step = 0
     first_epoch = 0
