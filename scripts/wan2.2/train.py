@@ -1181,16 +1181,20 @@ def main():
     # A good trainable modules is showed below now.
     # For 3D Patch: trainable_modules = ['ff.net', 'pos_embed', 'attn2', 'proj_out', 'timepositionalencoding', 'h_position', 'w_position']
     # For 2D Patch: trainable_modules = ['ff.net', 'attn2', 'timepositionalencoding', 'h_position', 'w_position']
+    trainable_vit_modules = [
+        'vit_proj', 
+        'vit_adapter_layers', 
+        'vit_norms', 
+        'vit_gating'
+    ]
     transformer3d.train()
-    if accelerator.is_main_process:
-        accelerator.print(
-            f"Trainable modules '{args.trainable_modules}'."
-        )
     for name, param in transformer3d.named_parameters():
-        for trainable_module_name in args.trainable_modules + args.trainable_modules_low_learning_rate:
-            if trainable_module_name in name:
-                param.requires_grad = True
-                break
+        if any(mod in name for mod in trainable_vit_modules):
+            param.requires_grad = True
+            if accelerator.is_main_process:
+                print(f"[Trainable] {name}")
+        else:
+            param.requires_grad = False
 
     # Create EMA for the transformer3d.
     if args.use_ema:
@@ -1333,34 +1337,41 @@ def main():
         optimizer_cls = CAME
     else:
         optimizer_cls = torch.optim.AdamW
+    
+    # === 精准替代：参数冻结逻辑 ===
+    transformer3d.requires_grad_(False) # 先全部锁定
+    
+    # 定义你要训练的“视觉补丁”组件
+    trainable_vit_modules = [
+        'vit_proj',             # 维度投影层
+        'vit_adapter_layers',   # 中间 Cross-Attention 层
+        'vit_norms',            # 适配层专用的 Norm
+        'vit_gating'            # 每一层的可学习开关
+    ]
+    
+    transformer3d.train()
+    for name, param in transformer3d.named_parameters():
+        if any(mod in name for mod in trainable_vit_modules):
+            param.requires_grad = True
+            if accelerator.is_main_process:
+                print(f"[Trainable Module] {name}")
+        else:
+            param.requires_grad = False
 
     trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
+    num_params = sum(p.numel() for p in trainable_params)
+    if accelerator.is_main_process:
+        print(f"Trainable params: {num_params / 1e9:.2f}B")
     trainable_params_optim = [
         {'params': [], 'lr': args.learning_rate},
         {'params': [], 'lr': args.learning_rate / 2},
     ]
-    in_already = []
+
+    # 打印可训练参数名称
     for name, param in transformer3d.named_parameters():
-        high_lr_flag = False
-        if name in in_already:
-            continue
-        for trainable_module_name in args.trainable_modules:
-            if trainable_module_name in name:
-                in_already.append(name)
-                high_lr_flag = True
-                trainable_params_optim[0]['params'].append(param)
-                if accelerator.is_main_process:
-                    print(f"Set {name} to lr : {args.learning_rate}")
-                break
-        if high_lr_flag:
-            continue
-        for trainable_module_name in args.trainable_modules_low_learning_rate:
-            if trainable_module_name in name:
-                in_already.append(name)
-                trainable_params_optim[1]['params'].append(param)
-                if accelerator.is_main_process:
-                    print(f"Set {name} to lr : {args.learning_rate / 2}")
-                break
+        if param.requires_grad:
+            print(f"{name} Train")
+    trainable_params_optim = [{'params': trainable_params, 'lr': args.learning_rate}]
 
     if args.use_came:
         optimizer = optimizer_cls(
@@ -1650,6 +1661,11 @@ def main():
 
     if sp_size > 1:
         accelerator.unwrap_model(transformer3d).enable_multi_gpus_inference()
+    
+    if hasattr(transformer3d, "enable_input_require_grads"):
+        transformer3d.enable_input_require_grads()
+    transformer3d.enable_gradient_checkpointing()
+    transformer3d.gradient_checkpointing_kwargs = {"use_reentrant": True}
 
     if fsdp_stage != 0:
         from functools import partial
