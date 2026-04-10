@@ -527,7 +527,7 @@ def rope_apply(x, grid_sizes, freqs, sp_size=1, sp_rank=0): # ✨ 加参数
 
 
 def apply_dropout(tokens,
-                  cfg_drop_prob=0.1,
+                  cfg_drop_prob=0.2,
                   enable_token_drop_prob=0.3,
                   token_drop_prob=0.2,
                   training=True,
