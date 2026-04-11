@@ -23,7 +23,7 @@ accelerate launch \
   --main_process_ip $MASTER_ADDR \
   --main_process_port $MASTER_PORT \
   --num_processes $TOTAL_PROCESSES \
-  --deepspeed_config_file config/zero_stage3_cpu_offload.json \
+  --deepspeed_config_file config/zero_stage3_config_cpu_offload.json \
   --deepspeed_multinode_launcher standard \
   scripts/wan2.2/train.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
