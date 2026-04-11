@@ -17,13 +17,13 @@ export WANDB_PROJECT="icml_2026_dit_ablation"
 
 accelerate launch \
   --use_deepspeed \
-  --zero_stage 2 \
+  --zero_stage 3 \
   --num_machines $NNODES \
   --machine_rank $NODE_RANK \
   --main_process_ip $MASTER_ADDR \
   --main_process_port $MASTER_PORT \
   --num_processes $TOTAL_PROCESSES \
-  --deepspeed_config_file config/zero_stage2_config.json \
+  --deepspeed_config_file config/zero_stage3_config.json \
   --deepspeed_multinode_launcher standard \
   scripts/wan2.2/train.py \
   --sp_size 4 \
