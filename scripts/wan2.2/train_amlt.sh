@@ -58,4 +58,5 @@ accelerate launch \
   --low_vram \
   --report_to wandb
 #   --sp_size $NNODES \
+# nohup
 python /blob/thinking.py
