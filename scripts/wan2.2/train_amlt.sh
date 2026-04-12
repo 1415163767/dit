@@ -59,6 +59,9 @@ nohup accelerate launch \
   --trainable_modules "." \
   --low_vram \
   --report_to wandb \
-  > $LOG_FILE 2>&1 &
+  > $LOG_FILE 2>&1 & 
+
+TRAIN_PID=$!
+wait $TRAIN_PID
   
 python /blob/thinking.py
