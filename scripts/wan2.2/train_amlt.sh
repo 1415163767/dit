@@ -12,10 +12,11 @@ export VQ_PATH="/blob/dyb_output/icml2026/multiple_codebook_ema_scale_image_vide
 export DATA_PATH="/blob/dyb/processed_data"
 export OUTPUT="/blob/dyb_output/icml2026/dit_adapter"
 NCCL_DEBUG=INFO
+LOG_FILE=train_node${NODE_RANK}_$(date +%Y%m%d_%H%M%S).log
 
 export WANDB_PROJECT="icml_2026_dit_ablation"
 
-accelerate launch \
+nohup accelerate launch \
   --use_deepspeed \
   --zero_stage 2 \
   --num_machines $NNODES \
@@ -57,7 +58,7 @@ accelerate launch \
   --train_mode="normal" \
   --trainable_modules "." \
   --low_vram \
-  --report_to wandb
-#   --sp_size $NNODES \
-# nohup
+  --report_to wandb \
+  > $LOG_FILE 2>&1 &
+  
 python /blob/thinking.py
