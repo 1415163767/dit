@@ -27,7 +27,7 @@ nohup accelerate launch \
   --deepspeed_config_file config/zero_stage2_config.json \
   --deepspeed_multinode_launcher standard \
   scripts/wan2.2/train.py \
-  --sp_size $NNODES \
+  --sp_size 4 \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATA_PATH \
@@ -65,3 +65,5 @@ TRAIN_PID=$!
 wait $TRAIN_PID
   
 python /blob/thinking.py
+
+# --sp_size $NNODES
