@@ -1449,7 +1449,9 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             f"x_head_mean: {x[:, 0].mean().item():.4f} | "
             f"x_tail_mean: {x[:, -1].mean().item():.4f} | "
             f"t: {t} of {t.shape} | "
-            f"freqs: {self.freqs.shape}",
+            f"freqs: {self.freqs.shape} | "
+            f"e0: {e0.shape} | "
+            f"e: {e.shape}",
         )
         
         # TeaCache
