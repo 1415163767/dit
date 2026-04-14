@@ -109,7 +109,7 @@ class ImageVideoDataset(Dataset):
         self,
         data_dir,
         video_sample_stride=1, video_sample_n_frames=33, vit_sample_stride=2,
-        resolution_list=[(512, 288), (288, 512)],
+        resolution_list=[(512,288), (288,512)],
         dit_resolution_list=[(1280,704), (704,1280)],
         text_drop_ratio=0.1,
         enable_bucket=False,
