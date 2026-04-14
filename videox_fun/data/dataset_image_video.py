@@ -109,7 +109,7 @@ class ImageVideoDataset(Dataset):
         self,
         data_dir,
         video_sample_stride=1, video_sample_n_frames=33, vit_sample_stride=2,
-        resolution_list=[(288,512),(512,288),(384,384)],
+        resolution_list=[(288,512),(512,288)],
         dit_resolution_list=[(704,1280),(1280,704)],
         text_drop_ratio=0.1,
         enable_bucket=False,
@@ -240,24 +240,25 @@ class ImageVideoDataset(Dataset):
         h, w, _ = pixel_values[0].shape
         tgt_h, tgt_w = min(self.resolution_list, key=lambda r: abs((r[1] / r[0]) - (w / h)))
         tgt_h_dit, tgt_w_dit = min(self.dit_resolution_list, key=lambda r: abs((r[1] / r[0]) - (w / h)))
-        scale = max(tgt_h / h, tgt_w / w)
+        # scale = max(tgt_h / h, tgt_w / w)
         scale_dit = max(tgt_h_dit / h, tgt_w_dit / w)
-        new_h, new_w = int(np.ceil(h * scale)), int(np.ceil(w * scale))
+        # new_h, new_w = int(np.ceil(h * scale)), int(np.ceil(w * scale))
         new_h_dit, new_w_dit = int(np.ceil(h * scale_dit)), int(np.ceil(w * scale_dit))
-        new_h = max(new_h, tgt_h)
-        new_w = max(new_w, tgt_w)
+        # new_h = max(new_h, tgt_h)
+        # new_w = max(new_w, tgt_w)
         new_h_dit = max(new_h_dit, tgt_h_dit)
         new_w_dit = max(new_w_dit, tgt_w_dit)
-        sh = max(0, (new_h - tgt_h) // 2)
-        sw = max(0, (new_w - tgt_w) // 2)
+        # sh = max(0, (new_h - tgt_h) // 2)
+        # sw = max(0, (new_w - tgt_w) // 2)
         sh_dit = max(0, (new_h_dit - tgt_h_dit) // 2)
         sw_dit = max(0, (new_w_dit - tgt_w_dit) // 2)
         for i in range(len(pixel_values)):
             frame = pixel_values[i]
-            resized_frame = cv2.resize(frame, (new_w, new_h))
+            # d_frame = cv2.resize(frame, (new_w, new_h))
             resized_frame_dit = cv2.resize(frame, (new_w_dit, new_h_dit))
-            cropped_frame = resized_frame[sh:sh + tgt_h, sw:sw + tgt_w]
+            # cropped_frame = resized_frame[sh:sh + tgt_h, sw:sw + tgt_w]
             cropped_frame_dit = resized_frame_dit[sh_dit:sh_dit + tgt_h_dit, sw_dit:sw_dit + tgt_w_dit]
+            cropped_frame = cv2.resize(cropped_frame_dit, (tgt_w, tgt_h))
             processed_frames.append(cropped_frame)
             processed_frames_dit.append(cropped_frame_dit)
         pixel_values = torch.from_numpy(np.stack(processed_frames, axis=0))  # (T, H, W, C)
