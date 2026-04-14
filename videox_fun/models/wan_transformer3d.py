@@ -1433,6 +1433,23 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 e = torch.chunk(e, self.sp_world_size, dim=1)[self.sp_world_rank]
         # print(f"Transformer Forward x shape: {x.shape} e0 shape: {e0.shape} context shape: {context.shape} seq_lens: {seq_lens} grid_sizes: {grid_sizes}")
         
+        rank = self.sp_world_rank
+        world = self.sp_world_size
+        
+        if vit_feat is not None:
+            assert x.shape[1] == vit_feat.shape[1], \
+                f"[SP {rank}] token mismatch: x {x.shape} vs vit {vit_feat.shape}"
+        
+        print(
+            f"[SP {rank}/{world}] "
+            f"x: {tuple(x.shape)} | "
+            f"vit: {tuple(vit_feat.shape) if vit_feat is not None else None} | "
+            f"seq_lens: {seq_lens} | "
+            f"grid: {grid_sizes} | "
+            f"x_head_mean: {x[:, 0].mean().item():.4f} | "
+            f"x_tail_mean: {x[:, -1].mean().item():.4f}",
+        )
+        
         # TeaCache
         if self.teacache is not None:
             if cond_flag:
