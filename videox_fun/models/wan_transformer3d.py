@@ -1432,7 +1432,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 e0 = torch.chunk(e0, self.sp_world_size, dim=1)[self.sp_world_rank]
                 e = torch.chunk(e, self.sp_world_size, dim=1)[self.sp_world_rank]
         # print(f"Transformer Forward x shape: {x.shape} e0 shape: {e0.shape} context shape: {context.shape} seq_lens: {seq_lens} grid_sizes: {grid_sizes}")
-        
+
+        '''
         rank = self.sp_world_rank
         world = self.sp_world_size
         
@@ -1453,6 +1454,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             f"e0: {e0.shape} | "
             f"e: {e.shape}",
         )
+        '''
         
         # TeaCache
         if self.teacache is not None:
@@ -1532,8 +1534,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                             sp_rank = self.sp_world_rank
                         )
                         # 叠加残差
-                        # x = x + self.vit_gating[i] * time_scale * h_vit
-                        x = x + self.vit_gating[i] * time_scale * h_vit * 0.0
+                        x = x + self.vit_gating[i] * time_scale * h_vit
+                        # x = x + self.vit_gating[i] * time_scale * h_vit * 0.0
                     
                 if cond_flag:
                     self.teacache.previous_residual_cond = x.cpu() - ori_x if self.teacache.offload else x - ori_x
@@ -1571,8 +1573,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         sp_rank = self.sp_world_rank
                     )
                     # 叠加残差
-                    # x = x + self.vit_gating[i] * time_scale * h_vit
-                    x = x + self.vit_gating[i] * time_scale * h_vit * 0.0
+                    x = x + self.vit_gating[i] * time_scale * h_vit
+                    # x = x + self.vit_gating[i] * time_scale * h_vit * 0.0
         # head
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             def create_custom_forward(module):
