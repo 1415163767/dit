@@ -89,8 +89,8 @@ accelerate launch \
   --dataloader_num_workers=4 \
   --num_train_epochs=1 \
   --checkpointing_steps=5000 \
-  --learning_rate=2e-05 \
-  --lr_scheduler="constant_with_warmup" \
+  --learning_rate=1e-04 \
+  --lr_scheduler="cosine" \
   --lr_warmup_ratio=0.03 \
   --seed=42 \
   --output_dir=$OUTPUT \
