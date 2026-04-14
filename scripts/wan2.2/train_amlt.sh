@@ -82,7 +82,7 @@ accelerate launch \
   --video_sample_stride=1 \
   --vit_sample_stride=2 \
   --video_sample_n_frames=33 \
-  --resolution_list "(512,288)" "(288,512)" "(384,384)" \
+  --resolution_list "(512,288)" "(288,512)" \
   --train_batch_size=1 \
   --resume_from_checkpoint "latest" \
   --gradient_accumulation_steps=1 \
