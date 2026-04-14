@@ -72,7 +72,7 @@ accelerate launch \
   --main_process_ip $MASTER_ADDR \
   --main_process_port $MASTER_PORT \
   --num_processes $TOTAL_PROCESSES \
-  --deepspeed_config_file config/zero_stage3_config.json \
+  --deepspeed_config_file config/zero_stage3_config_cpu_offload.json \
   --deepspeed_multinode_launcher standard \
   scripts/wan2.2/train.py \
   --config_path="config/wan2.2/wan_civitai_5b.yaml" \
@@ -81,7 +81,7 @@ accelerate launch \
   --vq_model_path=$VQ_PATH \
   --video_sample_stride=1 \
   --vit_sample_stride=2 \
-  --video_sample_n_frames=121 \
+  --video_sample_n_frames=81 \
   --resolution_list "(288,512)" \
   --train_batch_size=1 \
   --resume_from_checkpoint "latest" \
