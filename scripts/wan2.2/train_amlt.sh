@@ -81,7 +81,7 @@ accelerate launch \
   --vq_model_path=$VQ_PATH \
   --video_sample_stride=1 \
   --vit_sample_stride=2 \
-  --video_sample_n_frames=81 \
+  --video_sample_n_frames=49 \
   --resolution_list "(288,512)" \
   --train_batch_size=1 \
   --resume_from_checkpoint "latest" \
