@@ -1532,7 +1532,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                             sp_rank = self.sp_world_rank
                         )
                         # 叠加残差
-                        x = x + self.vit_gating[i] * time_scale * h_vit
+                        # x = x + self.vit_gating[i] * time_scale * h_vit
+                        x = x + self.vit_gating[i] * time_scale * h_vit * 0.0
                     
                 if cond_flag:
                     self.teacache.previous_residual_cond = x.cpu() - ori_x if self.teacache.offload else x - ori_x
@@ -1570,7 +1571,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         sp_rank = self.sp_world_rank
                     )
                     # 叠加残差
-                    x = x + self.vit_gating[i] * time_scale * h_vit
+                    # x = x + self.vit_gating[i] * time_scale * h_vit
+                    x = x + self.vit_gating[i] * time_scale * h_vit * 0.0
         # head
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             def create_custom_forward(module):
