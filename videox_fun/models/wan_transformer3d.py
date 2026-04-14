@@ -1439,7 +1439,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         if vit_feat is not None:
             assert x.shape[1] == vit_feat.shape[1], \
                 f"[SP {rank}] token mismatch: x {x.shape} vs vit {vit_feat.shape}"
-        
+
         print(
             f"[SP {rank}/{world}] "
             f"x: {tuple(x.shape)} | "
@@ -1447,7 +1447,9 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             f"seq_lens: {seq_lens} | "
             f"grid: {grid_sizes} | "
             f"x_head_mean: {x[:, 0].mean().item():.4f} | "
-            f"x_tail_mean: {x[:, -1].mean().item():.4f}",
+            f"x_tail_mean: {x[:, -1].mean().item():.4f} | "
+            f"t: {t} of {t.shape} | "
+            f"freqs: {self.freqs.shape}",
         )
         
         # TeaCache
